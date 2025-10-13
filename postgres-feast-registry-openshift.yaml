@@ -1,0 +1,92 @@
+---
+# PostgreSQL for Feast Registry (OpenShift-Compatible)
+# Uses Red Hat Universal Base Image (UBI) PostgreSQL
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: feast-postgres-secret
+  namespace: kft-feast-quickstart
+type: Opaque
+stringData:
+  POSTGRESQL_DATABASE: feast_registry
+  POSTGRESQL_USER: feast
+  POSTGRESQL_PASSWORD: <feast_password_change_me>
+  
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feast-postgres
+  namespace: kft-feast-quickstart
+  labels:
+    app: feast-postgres
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgresql
+  selector:
+    app: feast-postgres
+  clusterIP: None
+  
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: feast-postgres
+  namespace: kft-feast-quickstart
+spec:
+  serviceName: feast-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feast-postgres
+  template:
+    metadata:
+      labels:
+        app: feast-postgres
+    spec:
+      containers:
+      - name: postgresql
+        image: registry.redhat.io/rhel9/postgresql-15:latest
+        ports:
+        - containerPort: 5432
+          name: postgresql
+        envFrom:
+        - secretRef:
+            name: feast-postgres-secret
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/pgsql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - /usr/libexec/check-container
+            - --live
+          initialDelaySeconds: 120
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /usr/libexec/check-container
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 10
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+

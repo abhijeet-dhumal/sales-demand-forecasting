@@ -1,11 +1,49 @@
-# Feast Feature Store Configuration
+# Feast Feature Store Configuration - Simple Local Setup
+# SQLite for registry, online store, and file-based offline store
 
 project: sales_demand_forecasting
-registry: data/feast_registry.db
+
+# SQLite registry (local file-based)
+registry: /shared/feature_repo/data/feast_registry.db
+
 provider: local
+
+# SQLite online store for real-time inference
 online_store:
   type: sqlite
-  path: data/online_store.db
+  path: /shared/feature_repo/data/online_store.db
+
+# File-based offline store (simple, no Ray)
 offline_store:
   type: file
+
 entity_key_serialization_version: 3
+
+# ============================================================================
+# ADVANCED CONFIGURATION (Commented out - for distributed training only)
+# ============================================================================
+
+# # PostgreSQL registry (concurrent-safe for multi-process access)
+# registry:
+#   registry_type: sql
+#   path: postgresql+psycopg2://feast:<password>@feast-postgres.<your-namespace>.svc.cluster.local:5432/feast_registry
+#   cache_ttl_seconds: 60
+#   sqlalchemy_config_kwargs:
+#     echo: false
+#     pool_pre_ping: true
+
+# # Ray offline store for distributed feature retrieval
+# offline_store:
+#   type: ray
+#   storage_path: /shared/models/feast_ray_storage
+#   ray_address: null
+#   broadcast_join_threshold_mb: 50
+#   enable_distributed_joins: true
+#   max_parallelism_multiplier: 1
+#   target_partition_size_mb: 32
+#   window_size_for_joins: 1H
+#   enable_ray_logging: true
+#   ray_conf:
+#     num_cpus: 2
+#     object_store_memory: 2147483648
+#     _memory: 4294967296
