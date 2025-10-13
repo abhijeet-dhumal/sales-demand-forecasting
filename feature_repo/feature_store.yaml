@@ -1,11 +1,39 @@
-# Feast Feature Store Configuration
+# Feast Feature Store Configuration - Simple Local Setup
+# SQLite for registry, online store, and file-based offline store
 
 project: sales_demand_forecasting
-registry: data/feast_registry.db
+
+# SQLite registry (local file-based)
+registry: /shared/feature_repo/data/feast_registry.db
+
 provider: local
+
+# SQLite online store for real-time inference
 online_store:
   type: sqlite
-  path: data/online_store.db
+  path: /shared/feature_repo/data/online_store.db
+
+# File-based offline store (simple, no Ray)
 offline_store:
   type: file
+
 entity_key_serialization_version: 3
+
+
+# For production deployments with high concurrency requirements, you can use:
+# - PostgreSQL for the registry (instead of SQLite)
+# - Ray for distributed offline store (instead of file-based)
+#
+# However, for most use cases, the simple SQLite + file-based setup above is sufficient.
+# The training script uses direct parquet loading which bypasses Feast for speed.
+#
+# # PostgreSQL registry example:
+# # registry:
+# #   registry_type: sql
+# #   path: postgresql+psycopg2://feast:<password>@feast-postgres.<your-namespace>.svc.cluster.local:5432/feast_registry
+# #   cache_ttl_seconds: 60
+#
+# # Ray offline store example:
+# # offline_store:
+# #   type: ray
+# #   storage_path: /shared/models/feast_ray_storage

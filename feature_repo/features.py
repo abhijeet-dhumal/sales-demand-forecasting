@@ -59,18 +59,14 @@ dept_entity = Entity(
 # Sales Data Source (with pre-computed time-series features)
 sales_source = FileSource(
     name="sales_source",
-    path="data/sales_features.parquet",
+    path="/shared/feature_repo/data/sales_features.parquet",
     timestamp_field="date",
-    description="Sales data with pre-computed time-series features. "
-                "Features computed in ETL pipeline (download_data.py).",
 )
 
-# Store External Features
 store_external_source = FileSource(
     name="store_external_source",
-    path="data/store_features.parquet",
+    path="/shared/feature_repo/data/store_features.parquet",
     timestamp_field="date",
-    description="Store-level external factors.",
 )
 
 
