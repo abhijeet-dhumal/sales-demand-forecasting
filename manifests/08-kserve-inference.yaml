@@ -1,0 +1,30 @@
+# KServe Inference - External access resources
+#
+# NOTE: InferenceService is created by notebook 03-inference.ipynb
+# Apply this AFTER running the notebook to enable external access.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sales-forecast-external
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: sales-forecast
+  ports:
+  - name: http
+    port: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: sales-forecast-external
+  port:
+    targetPort: http
+  tls:
+    termination: edge

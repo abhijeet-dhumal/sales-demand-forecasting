@@ -1,0 +1,20 @@
+# Namespace and Prerequisites
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast-mlops
+---
+# Shared storage for notebooks, feature_repo, and data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi

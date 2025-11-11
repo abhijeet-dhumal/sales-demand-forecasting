@@ -1,0 +1,162 @@
+# PostgreSQL - Shared database for Feast + MLflow
+#
+# PRODUCTION NOTE: Replace this Secret with:
+# - External Secrets Operator (AWS Secrets Manager, HashiCorp Vault)
+# - Sealed Secrets
+# - SOPS encrypted secrets
+#
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: feast-mlops
+type: Opaque
+stringData:
+  host: postgres.feast-trainer-demo.svc.cluster.local
+  port: "5432"
+  username: feast
+  password: feast123  # TODO: Use external secret management in production
+  database: feast
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: feast-trainer-demo
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: feast-mlops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Required for RWO PVC
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/name: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: registry.redhat.io/rhel9/postgresql-15:latest
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRESQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRESQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: POSTGRESQL_DATABASE
+          value: feast
+        - name: POSTGRESQL_ADMIN_PASSWORD
+          value: postgres123
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/pgsql/data
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1
+            memory: 2Gi
+        readinessProbe:
+          exec:
+            command: ["/bin/sh", "-c", "pg_isready -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["/bin/sh", "-c", "pg_isready -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-data
+---
+# Init job to create MLflow database
+# Note: Job persists until namespace deletion (no TTL) for clean kustomize delete
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-init
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: postgres-init
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: feast-mlops
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init
+        image: registry.redhat.io/rhel9/postgresql-15:latest
+        env:
+        - name: PGHOST
+          value: postgres
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: PGDATABASE
+          value: feast
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "Waiting for PostgreSQL..."
+          until pg_isready -h $PGHOST -U postgres; do sleep 2; done
+          
+          echo "Creating MLflow database..."
+          # feast database is auto-created by POSTGRESQL_DATABASE env var
+          # Only need to create mlflow database for MLflow tracking
+          PGPASSWORD=postgres123 psql -h $PGHOST -U postgres -c "CREATE DATABASE mlflow OWNER feast;" 2>/dev/null || echo "mlflow exists"
+          
+          echo "Database ready!"

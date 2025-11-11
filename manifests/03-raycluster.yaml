@@ -1,0 +1,129 @@
+# KubeRay Cluster - Distributed processing for Feast
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: feast-ray
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-ray
+    ray.io/cluster: feast-ray
+spec:
+  rayVersion: '2.52.1'
+  enableInTreeAutoscaling: false
+  
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      num-cpus: '4'
+      num-gpus: '1'
+      block: 'true'
+      ray-client-server-port: '10001'
+      object-store-memory: '4000000000'
+    template:
+      metadata:
+        labels:
+          app: feast-ray
+          component: head
+          ray.io/cluster: feast-ray
+      spec:
+        containers:
+        - name: ray-head
+          image: quay.io/modh/ray:2.52.1-py312-cu128
+          ports:
+          - containerPort: 6379
+            name: gcs
+          - containerPort: 8265
+            name: dashboard
+          - containerPort: 10001
+            name: client
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "24Gi"
+              nvidia.com/gpu: "1"
+          env:
+          - name: FEAST_DATA_ROOT
+            value: "/shared/data"
+          volumeMounts:
+          # Mount at /shared (native path)
+          - name: shared-storage
+            mountPath: /shared
+          # Mount at workbench path (avoids symlink hack)
+          - name: shared-storage
+            mountPath: /opt/app-root/src/shared
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+  
+  workerGroupSpecs:
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 2
+    groupName: workers
+    rayStartParams:
+      num-cpus: '4'
+      num-gpus: '1'
+      block: 'true'
+      object-store-memory: '4000000000'
+    template:
+      metadata:
+        labels:
+          app: feast-ray
+          component: worker
+          ray.io/cluster: feast-ray
+      spec:
+        containers:
+        - name: ray-worker
+          image: quay.io/modh/ray:2.52.1-py312-cu128
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "24Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: shared-storage
+            mountPath: /shared
+          - name: shared-storage
+            mountPath: /opt/app-root/src/shared
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+# Service created automatically by KubeRay operator as "feast-ray-head-svc"
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feast-ray-dashboard
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: feast-ray-head-svc
+  port:
+    targetPort: dashboard
+  tls:
+    termination: edge

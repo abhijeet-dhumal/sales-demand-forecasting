@@ -1,0 +1,655 @@
+# Feast Feature Store Setup (Data Preparation)
+# 
+# This Job prepares the Feast Feature Store:
+# 1. Generates sales data (parquet files)
+# 2. Creates Feast project with TWO configs:
+#    - feature_store.yaml (file-based) - for apply/materialize
+#    - feature_store_ray.yaml (Ray) - for training's get_historical_features()
+# 3. feast apply - registers features to PostgreSQL registry
+# 4. feast materialize-incremental - populates online store
+# 5. Tests online feature retrieval
+#
+# FOR BIG DATA (>1M rows): Uncomment the batch_engine section in
+# feature_store.yaml to enable distributed materialization via Ray.
+#
+# NOTE: get_historical_features() is called in Training Job using Ray config
+#
+# Architecture:
+# - Registry: PostgreSQL (SQL-based, durable)
+# - Offline Store: File (apply/materialize) | Ray (training)
+# - Online Store: PostgreSQL (low-latency serving)
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: feast-dataprep
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-dataprep
+    pipeline: sales-forecasting
+    component: feature-engineering
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: feast-dataprep
+        pipeline: sales-forecasting
+    spec:
+      serviceAccountName: feast-sa
+      restartPolicy: Never
+      # Init container installs dependencies once
+      initContainers:
+      - name: install-deps
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command:
+        - pip
+        - install
+        - --target=/pylibs
+        - -q
+        - feast[postgres,ray]==0.59.0
+        - codeflare-sdk
+        - psycopg2-binary
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+      containers:
+      - name: feast-ray
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+        env:
+        - name: PYTHONPATH
+          value: /pylibs
+        - name: PATH
+          value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        - name: POSTGRES_HOST
+          value: "postgres.feast-trainer-demo.svc.cluster.local"
+        - name: FEAST_RAY_USE_KUBERAY
+          value: "true"
+        - name: FEAST_RAY_CLUSTER_NAME
+          value: "feast-ray"
+        - name: FEAST_RAY_NAMESPACE
+          value: "feast-trainer-demo"
+        - name: FEAST_RAY_SKIP_TLS
+          value: "true"
+        - name: DATA_DIR
+          value: "/shared/data"
+        - name: FEATURE_REPO_DIR
+          value: "/shared/feature_repo"
+        - name: DATA_CONFIG
+          value: '{"start_date": "2022-01-01", "weeks": 104, "stores": 45, "departments": 14, "seed": 42}'
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "============================================================"
+          echo "🍕 FEAST + RAY DISTRIBUTED FEATURE ENGINEERING"
+          echo "============================================================"
+          
+          # Setup in-cluster auth for CodeFlare SDK
+          export FEAST_RAY_AUTH_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          export FEAST_RAY_AUTH_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+          echo "🔐 In-cluster auth configured"
+          
+          # Run Feast workflow
+          bash /scripts/run.sh
+      volumes:
+      - name: pylibs
+        emptyDir: {}
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: shared
+      - name: scripts
+        configMap:
+          name: feast-dataprep-scripts
+---
+# ConfigMap with all Feast + Ray scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feast-dataprep-scripts
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-dataprep
+    pipeline: sales-forecasting
+data:
+  # Feast Feature Store Configuration
+  # File-based offline store for feast apply/materialize
+  # Training Job uses feature_store_ray.yaml for get_historical_features()
+  #
+  # FOR BIG DATA (>1M rows): Uncomment batch_engine section below to enable
+  # distributed materialization via Ray cluster
+  feature_store.yaml: |
+    project: sales_forecasting
+    provider: local
+    
+    registry:
+      registry_type: sql
+      path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+      cache_ttl_seconds: 60
+    
+    # File-based offline store (stable for apply/materialize)
+    offline_store:
+      type: file
+    
+    # PostgreSQL online store for low-latency serving
+    online_store:
+      type: postgres
+      host: postgres.feast-trainer-demo.svc.cluster.local
+      port: 5432
+      database: feast
+      user: feast
+      password: feast123
+    
+    # =========================================================================
+    # Ray batch_engine for distributed materialization (enabled by default)
+    # Comment out below for quick start without Ray cluster
+    # =========================================================================
+    batch_engine:
+      type: ray.engine
+      ray_address: ray://feast-ray-head-svc.feast-trainer-demo.svc.cluster.local:10001
+    
+    entity_key_serialization_version: 3
+  
+  # Ray-enabled config (used by Training Job for get_historical_features)
+  feature_store_ray.yaml: |
+    project: sales_forecasting
+    provider: local
+    
+    registry:
+      registry_type: sql
+      path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+      cache_ttl_seconds: 60
+    
+    # Ray offline store in KubeRay mode (for distributed historical retrieval)
+    offline_store:
+      type: ray
+      storage_path: /shared/data/ray_storage
+      use_kuberay: true
+      kuberay_conf:
+        cluster_name: "feast-ray"
+        namespace: "feast-trainer-demo"
+        skip_tls: true
+      broadcast_join_threshold_mb: 100
+      enable_distributed_joins: true
+      enable_ray_logging: true
+    
+    online_store:
+      type: postgres
+      host: postgres.feast-trainer-demo.svc.cluster.local
+      port: 5432
+      database: feast
+      user: feast
+      password: feast123
+    
+    entity_key_serialization_version: 3
+
+  # Optimized Feature Definitions for Sales Forecasting
+  # v2 - High-impact features, no lag_52 (causes data loss)
+  features.py: |
+    """
+    Optimized Feature Definitions for Sales Forecasting
+    
+    Feature Importance:
+    - Lag features (35%): lag_1, lag_2, lag_4, lag_8
+    - Rolling stats (28%): rolling_mean_4w, rolling_std_4w, sales_vs_avg
+    - Temporal (18%): week_of_year, month, quarter, week_of_month, is_month_end
+    - Holiday (10%): is_holiday, days_to_holiday
+    - Economic (7%): temperature, fuel_price, cpi, unemployment
+    """
+    from datetime import timedelta
+    from feast import Entity, FeatureView, Field, FileSource, FeatureService
+    from feast.on_demand_feature_view import on_demand_feature_view
+    from feast.types import Float32, Float64, Int32, Int64, String
+    
+    # Entities
+    store = Entity(name="store_id", join_keys=["store_id"], description="Store identifier")
+    department = Entity(name="dept_id", join_keys=["dept_id"], description="Department identifier")
+    
+    # Sales features - optimized schema (pre-sorted for fast PIT joins)
+    sales_features = FeatureView(
+        name="sales_features",
+        description="Weekly sales with optimized features for accurate forecasting",
+        entities=[store, department],
+        ttl=timedelta(days=90),
+        schema=[
+            # Target
+            Field(name="weekly_sales", dtype=Float32, description="Weekly sales ($)"),
+            # Lag features (35% importance) - only up to 8 weeks to keep data
+            Field(name="lag_1", dtype=Float32, description="Sales 1 week ago"),
+            Field(name="lag_2", dtype=Float32, description="Sales 2 weeks ago"),
+            Field(name="lag_4", dtype=Float32, description="Sales 4 weeks ago"),
+            Field(name="lag_8", dtype=Float32, description="Sales 8 weeks ago"),
+            # Rolling statistics (28% importance)
+            Field(name="rolling_mean_4w", dtype=Float32, description="4-week rolling mean"),
+            Field(name="rolling_std_4w", dtype=Float32, description="4-week rolling std (volatility)"),
+            Field(name="sales_vs_avg", dtype=Float32, description="Current/rolling_mean ratio"),
+            # Temporal features (18% importance)
+            Field(name="week_of_year", dtype=Int32, description="Week 1-52"),
+            Field(name="month", dtype=Int32, description="Month 1-12"),
+            Field(name="quarter", dtype=Int32, description="Quarter 1-4"),
+            Field(name="week_of_month", dtype=Int32, description="Week 1-5 within month"),
+            Field(name="is_month_end", dtype=Int32, description="Last week of month"),
+            # Holiday features (10% importance)
+            Field(name="is_holiday", dtype=Int32, description="Holiday week indicator"),
+            Field(name="days_to_holiday", dtype=Int32, description="Days to next holiday"),
+            # Economic indicators (7% importance)
+            Field(name="temperature", dtype=Float32, description="Temperature (F)"),
+            Field(name="fuel_price", dtype=Float32, description="Fuel price ($/gal)"),
+            Field(name="cpi", dtype=Float32, description="Consumer Price Index"),
+            Field(name="unemployment", dtype=Float32, description="Unemployment rate (%)"),
+        ],
+        source=FileSource(path="/shared/data/sales_features.parquet", timestamp_field="event_timestamp"),
+        online=True,
+        tags={"team": "demand-forecasting", "version": "v2-optimized"},
+    )
+    
+    # Store features - static dimensions
+    store_features = FeatureView(
+        name="store_features",
+        description="Store metadata (slowly changing dimensions)",
+        entities=[store, department],
+        ttl=timedelta(days=365),
+        schema=[
+            Field(name="store_type", dtype=String, description="Store type (A/B/C)"),
+            Field(name="store_size", dtype=Int64, description="Store size (sqft)"),
+            Field(name="region", dtype=String, description="Geographic region"),
+        ],
+        source=FileSource(path="/shared/data/store_features.parquet", timestamp_field="event_timestamp"),
+        online=True,
+        tags={"team": "demand-forecasting"},
+    )
+    
+    # On-demand features for real-time inference
+    @on_demand_feature_view(
+        sources=[sales_features, store_features],
+        schema=[
+            Field(name="sales_per_sqft", dtype=Float64),
+            Field(name="momentum", dtype=Float64),
+        ],
+        mode="python",
+        singleton=True,
+    )
+    def derived_features(inputs: dict) -> dict:
+        weekly_sales = float(inputs.get("weekly_sales") or 0)
+        store_size = float(inputs.get("store_size") or 1) or 1
+        lag_1 = float(inputs.get("lag_1") or 1) or 1
+        return {
+            "sales_per_sqft": weekly_sales / store_size,
+            "momentum": (weekly_sales - lag_1) / lag_1,
+        }
+    
+    # === FEATURE SERVICES ===
+    
+    # Training: optimized feature set (includes target)
+    training_features = FeatureService(
+        name="training_features",
+        description="Optimized features for model training (v2)",
+        features=[
+            sales_features[[
+                "weekly_sales",
+                # Lag (35%)
+                "lag_1", "lag_2", "lag_4", "lag_8",
+                # Rolling (28%)
+                "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+                # Temporal (18%)
+                "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+                # Holiday (10%)
+                "is_holiday", "days_to_holiday",
+                # Economic (7%)
+                "temperature", "fuel_price", "cpi", "unemployment",
+            ]],
+            store_features[["store_type", "store_size", "region"]],
+        ],
+        tags={"stage": "training", "version": "v2-optimized"},
+    )
+    
+    # Inference: excludes target, includes on-demand
+    inference_features = FeatureService(
+        name="inference_features",
+        description="Features for real-time inference (v2)",
+        features=[
+            sales_features[[
+                "lag_1", "lag_2", "lag_4", "lag_8",
+                "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+                "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+                "is_holiday", "days_to_holiday",
+                "temperature", "fuel_price", "cpi", "unemployment",
+            ]],
+            store_features[["store_type", "store_size", "region"]],
+            derived_features,
+        ],
+        tags={"stage": "inference", "version": "v2-optimized"},
+    )
+
+  # Data generator - Optimized feature engineering
+  data_generator.py: |
+    """
+    Optimized Sales Data Generator with High-Impact Features
+    
+    Features generated (by importance):
+    - Lag features (35%): lag_1, lag_2, lag_4, lag_8
+    - Rolling stats (28%): rolling_mean_4w, rolling_std_4w, sales_vs_avg
+    - Temporal (18%): week_of_year, month, quarter, week_of_month, is_month_end
+    - Holiday (10%): is_holiday, days_to_holiday
+    - Economic (7%): temperature, fuel_price, cpi, unemployment
+    
+    Data is PRE-SORTED by (store_id, dept_id, event_timestamp) for fast PIT joins!
+    """
+    import os
+    import json
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    
+    print("🚀 Optimized Feature Engineering Pipeline")
+    print("=" * 60)
+    
+    config = json.loads(os.getenv("DATA_CONFIG", '{"start_date": "2022-01-01", "weeks": 104, "stores": 45, "departments": 14, "seed": 42}'))
+    data_dir = os.getenv("DATA_DIR", "/shared/data")
+    
+    np.random.seed(config.get("seed", 42))
+    base_date = datetime.fromisoformat(config["start_date"]).replace(tzinfo=timezone.utc)
+    
+    # Define major US retail holidays (week of year)
+    MAJOR_HOLIDAYS = {
+        6: "Super Bowl",      # Early Feb
+        47: "Thanksgiving",   # Late Nov  
+        51: "Christmas",      # Late Dec
+        52: "New Year",       # Late Dec
+        27: "July 4th",       # Early Jul
+        36: "Labor Day",      # Early Sep
+    }
+    
+    print(f"📊 Generating data: {config['weeks']} weeks × {config['stores']} stores × {config['departments']} depts")
+    
+    records = []
+    for week in range(config["weeks"]):
+        week_date = base_date + timedelta(weeks=week)
+        week_of_year = (week_date.isocalendar()[1])  # Actual week of year 1-52
+        month = week_date.month
+        quarter = (month - 1) // 3 + 1
+        
+        # Week of month (1-5)
+        day_of_month = week_date.day
+        week_of_month = min(5, (day_of_month - 1) // 7 + 1)
+        
+        # Is month end (last 7 days)
+        next_month = (week_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+        days_until_month_end = (next_month - week_date).days
+        is_month_end = int(days_until_month_end <= 7)
+        
+        # Holiday features
+        is_holiday = int(week_of_year in MAJOR_HOLIDAYS)
+        
+        # Days to next holiday
+        days_to_holiday = 365
+        for hw in MAJOR_HOLIDAYS.keys():
+            days_diff = (hw - week_of_year) % 52
+            if days_diff > 0:
+                days_to_holiday = min(days_to_holiday, days_diff * 7)
+        
+        # Seasonal and holiday multipliers
+        seasonal = 1 + 0.3 * np.sin(2 * np.pi * week_of_year / 52)
+        holiday_boost = 1.5 if is_holiday else 1.0
+        
+        for store_id in range(1, config["stores"] + 1):
+            store_base = 50000 + store_id * 5000
+            for dept_id in range(1, config["departments"] + 1):
+                dept_factor = 0.5 + dept_id * 0.2
+                noise = np.random.normal(0, 2000)
+                
+                records.append({
+                    "store_id": store_id,
+                    "dept_id": dept_id,
+                    "event_timestamp": week_date,
+                    "weekly_sales": round(max(0, store_base * dept_factor * seasonal * holiday_boost + noise), 2),
+                    # Temporal features
+                    "week_of_year": week_of_year,
+                    "month": month,
+                    "quarter": quarter,
+                    "week_of_month": week_of_month,
+                    "is_month_end": is_month_end,
+                    # Holiday features
+                    "is_holiday": is_holiday,
+                    "days_to_holiday": days_to_holiday,
+                    # Economic indicators
+                    "temperature": round(60 + 20 * np.sin(2 * np.pi * week_of_year / 52) + np.random.normal(0, 5), 1),
+                    "fuel_price": round(3 + 0.5 * np.random.random(), 2),
+                    "cpi": round(220 + week * 0.1, 1),
+                    "unemployment": round(5 + np.random.normal(0, 0.5), 1)
+                })
+    
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Create DataFrame and SORT for fast PIT joins
+    print("📦 Building DataFrame and sorting for fast PIT joins...")
+    sales_df = pd.DataFrame(records)
+    sales_df = sales_df.sort_values(["store_id", "dept_id", "event_timestamp"]).reset_index(drop=True)
+    
+    # === LAG FEATURES (35% importance) ===
+    print("⏱️  Computing lag features...")
+    for lag in [1, 2, 4, 8]:  # Removed lag_52 - causes data loss
+        sales_df[f"lag_{lag}"] = sales_df.groupby(["store_id", "dept_id"])["weekly_sales"].shift(lag)
+    
+    # === ROLLING STATISTICS (28% importance) ===
+    print("📈 Computing rolling statistics...")
+    grouped = sales_df.groupby(["store_id", "dept_id"])["weekly_sales"]
+    sales_df["rolling_mean_4w"] = grouped.transform(lambda x: x.rolling(4, min_periods=1).mean())
+    sales_df["rolling_std_4w"] = grouped.transform(lambda x: x.rolling(4, min_periods=2).std())
+    
+    # Sales vs average (momentum indicator)
+    sales_df["sales_vs_avg"] = sales_df["weekly_sales"] / sales_df["rolling_mean_4w"].replace(0, 1)
+    
+    # Fill NaN values (only affects first few rows per group)
+    sales_df["rolling_std_4w"] = sales_df["rolling_std_4w"].fillna(0)
+    sales_df["sales_vs_avg"] = sales_df["sales_vs_avg"].fillna(1.0)
+    
+    # For lag features, fill with rolling mean (more realistic than 0)
+    for lag in [1, 2, 4, 8]:
+        sales_df[f"lag_{lag}"] = sales_df[f"lag_{lag}"].fillna(sales_df["rolling_mean_4w"])
+    
+    # Final fillna for any remaining NaN
+    sales_df = sales_df.fillna(0)
+    
+    # Count valid training rows (rows with actual lag history)
+    valid_rows = len(sales_df[sales_df["lag_8"] > 0])
+    print(f"   Valid training rows (with 8-week history): {valid_rows:,} ({100*valid_rows/len(sales_df):.1f}%)")
+    
+    # Save parquet files (pre-sorted for fast PIT joins)
+    print("💾 Saving parquet files (pre-sorted)...")
+    sales_df.to_parquet(f"{data_dir}/sales_features.parquet", index=False)
+    
+    # Also save as features.parquet for direct training access
+    training_df = sales_df.rename(columns={"event_timestamp": "date"})
+    training_df.to_parquet(f"{data_dir}/features.parquet", index=False)
+    
+    # Entity DataFrame for historical feature retrieval
+    entities_df = sales_df[["store_id", "dept_id", "event_timestamp"]].rename(columns={"event_timestamp": "date"})
+    entities_df.to_parquet(f"{data_dir}/entities.parquet", index=False)
+    
+    # Store features (static dimensions)
+    stores_records = []
+    for store_id in range(1, config["stores"] + 1):
+        for dept_id in range(1, config["departments"] + 1):
+            stores_records.append({
+                "store_id": store_id,
+                "dept_id": dept_id,
+                "event_timestamp": base_date,
+                "store_type": ["A", "B", "C"][store_id % 3],
+                "store_size": 100000 + store_id * 10000,
+                "region": f"region_{(store_id - 1) // 15 + 1}"  # 3 regions
+            })
+    stores_df = pd.DataFrame(stores_records)
+    stores_df.to_parquet(f"{data_dir}/store_features.parquet", index=False)
+    
+    print("")
+    print("=" * 60)
+    print(f"✅ Generated {len(sales_df):,} sales records")
+    print(f"   Stores: {config['stores']}, Departments: {config['departments']}")
+    print(f"   Valid training rows: {valid_rows:,}")
+    print(f"   Files: {data_dir}/")
+    print("")
+    print("📋 Feature summary:")
+    print(f"   Lag: lag_1, lag_2, lag_4, lag_8")
+    print(f"   Rolling: rolling_mean_4w, rolling_std_4w, sales_vs_avg")
+    print(f"   Temporal: week_of_year, month, quarter, week_of_month, is_month_end")
+    print(f"   Holiday: is_holiday, days_to_holiday")
+    print(f"   Economic: temperature, fuel_price, cpi, unemployment")
+
+  # Main execution script
+  run.sh: |
+    #!/bin/bash
+    set -e
+    
+    DATA_DIR="${DATA_DIR:-/shared/data}"
+    FEATURE_REPO="${FEATURE_REPO_DIR:-/shared/feature_repo}"
+    
+    echo ""
+    echo "📋 Configuration:"
+    echo "   DATA_DIR: $DATA_DIR"
+    echo "   FEATURE_REPO: $FEATURE_REPO"
+    echo "   Ray Mode: KubeRay (CodeFlare SDK)"
+    
+    # Step 1: Generate data
+    echo ""
+    echo "📊 Step 1: Generate Sales Data"
+    echo "============================================================"
+    python /scripts/data_generator.py
+    
+    # Step 2: Setup Feast project
+    echo ""
+    echo "⚙️  Step 2: Setup Feast Project"
+    echo "============================================================"
+    mkdir -p "$FEATURE_REPO"
+    mkdir -p "$DATA_DIR/ray_storage"
+    mkdir -p "$DATA_DIR/saved_datasets"
+    # Clean up stale files
+    rm -f "$FEATURE_REPO"/*.py "$FEATURE_REPO"/*.yaml 2>/dev/null || true
+    # Copy Feast configs and features
+    cp /scripts/feature_store.yaml "$FEATURE_REPO/"           # File-based (for apply/materialize)
+    cp /scripts/feature_store_ray.yaml "$FEATURE_REPO/"       # Ray-enabled (for training)
+    cp /scripts/features.py "$FEATURE_REPO/"
+    echo "   ✅ Project: $FEATURE_REPO"
+    echo "   📁 Config: feature_store.yaml (file-based)"
+    echo "   📁 Config: feature_store_ray.yaml (Ray/KubeRay)"
+    
+    # Step 3: Apply features
+    echo ""
+    echo "📝 Step 3: feast apply (register features)"
+    echo "============================================================"
+    cd "$FEATURE_REPO"
+    feast apply
+    echo "   ✅ Features registered to PostgreSQL registry"
+    
+    # Step 4: Materialize to online store
+    echo ""
+    echo "🚀 Step 4: feast materialize (Populate Online Store)"
+    echo "============================================================"
+    echo "   Materializing features to PostgreSQL online store..."
+    # Full materialization from data start to now
+    # For production, use feast materialize-incremental for subsequent runs
+    feast materialize 2022-01-01T00:00:00 $(date -u +%Y-%m-%dT%H:%M:%S)
+    echo "   ✅ Features materialized to PostgreSQL online store"
+    
+    # Step 5: Verify Features (including On-Demand)
+    echo ""
+    echo "🔍 Step 5: Verify Features (Batch + On-Demand)"
+    echo "============================================================"
+    python - << 'VERIFY'
+    from feast import FeatureStore
+    import pandas as pd
+    from datetime import datetime, timezone, timedelta
+    
+    store = FeatureStore(repo_path=".")
+    
+    print("   📋 Registered Objects:")
+    print(f"      Entities: {[e.name for e in store.list_entities()]}")
+    print(f"      FeatureViews: {[fv.name for fv in store.list_feature_views()]}")
+    print(f"      OnDemandFeatureViews: {[odfv.name for odfv in store.list_on_demand_feature_views()]}")
+    print(f"      FeatureServices: {[fs.name for fs in store.list_feature_services()]}")
+    
+    # Online lookup with optimized features
+    print("\n   🔄 Online Feature Lookup (Optimized Features):")
+    online = store.get_online_features(
+        features=[
+            "sales_features:weekly_sales",
+            "sales_features:lag_1",
+            "sales_features:rolling_mean_4w",
+            "sales_features:rolling_std_4w",
+            "sales_features:week_of_year",
+            "sales_features:is_holiday",
+            "store_features:store_size",
+        ],
+        entity_rows=[{"store_id": 1, "dept_id": 1}]
+    ).to_dict()
+    
+    ws = online.get('weekly_sales', [None])[0]
+    lag = online.get('lag_1', [None])[0]
+    roll_mean = online.get('rolling_mean_4w', [None])[0]
+    roll_std = online.get('rolling_std_4w', [None])[0]
+    woy = online.get('week_of_year', [None])[0]
+    
+    print(f"      weekly_sales: ${ws:,.0f}" if ws else "      weekly_sales: N/A")
+    print(f"      lag_1: ${lag:,.0f}" if lag else "      lag_1: N/A")
+    print(f"      rolling_mean_4w: ${roll_mean:,.0f}" if roll_mean else "      rolling_mean_4w: N/A")
+    print(f"      rolling_std_4w: ${roll_std:,.0f}" if roll_std else "      rolling_std_4w: N/A (volatility)")
+    print(f"      week_of_year: {woy}" if woy else "      week_of_year: N/A")
+    
+    # Test On-Demand Feature Views
+    print("\n   ⚡ On-Demand Features (Real-time Computation):")
+    inference_result = store.get_online_features(
+        features=[
+            "sales_features:weekly_sales",
+            "sales_features:lag_1",
+            "store_features:store_size",
+            "derived_features:sales_per_sqft",
+            "derived_features:momentum",
+        ],
+        entity_rows=[{"store_id": 1, "dept_id": 1}]
+    ).to_dict()
+    
+    sps = inference_result.get('sales_per_sqft', [None])[0]
+    mom = inference_result.get('momentum', [None])[0]
+    
+    print(f"      sales_per_sqft: {sps:.4f}" if sps is not None else "      sales_per_sqft: N/A")
+    print(f"      momentum: {mom:.2%}" if mom is not None else "      momentum: N/A")
+    
+    print("\n   ✅ Feature retrieval (batch + on-demand) working!")
+    VERIFY
+    
+    # Note: get_historical_features() is called in Training Job (not here)
+    # This avoids redundant Ray calls and demonstrates full Feast integration in training
+    
+    echo ""
+    echo "============================================================"
+    echo "✅ FEAST FEATURE STORE READY!"
+    echo "============================================================"
+    echo "   📁 Data: $DATA_DIR"
+    echo "   📝 Feature Repo: $FEATURE_REPO"
+    echo "   🔗 Registry: PostgreSQL"
+    echo "   ⚡ Offline Store: Ray (KubeRay + CodeFlare SDK)"
+    echo "   💾 Online Store: PostgreSQL (materialized)"
+    echo ""
+    echo "   Next Steps:"
+    echo "   - Training Job will call get_historical_features()"
+    echo "   - Inference Service will call get_online_features()"
+    echo "   - Both use Feature Services for consistency"

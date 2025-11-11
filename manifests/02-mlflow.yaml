@@ -1,0 +1,205 @@
+# MLflow - RHOAI Native with PostgreSQL + MinIO
+#
+# =============================================================================
+# SETUP (One-time, in order)
+# =============================================================================
+#
+# 1. Enable MLflow Operator:
+#    kubectl patch datasciencecluster default-dsc --type=merge \
+#      -p '{"spec":{"components":{"mlflowoperator":{"managementState":"Managed"}}}}'
+#
+# 2. Create MLflow database (after postgres-init job completes):
+#    kubectl exec -n feast-trainer-demo deploy/postgres -- \
+#      psql -U postgres -c "CREATE DATABASE mlflow OWNER feast;"
+#
+# 3. Apply kustomize (includes MinIO below):
+#    kubectl apply -k manifests/
+#
+# 4. Create MinIO bucket (after MinIO starts):
+#    kubectl exec -n feast-trainer-demo deploy/minio -- mkdir -p /data/mlflow
+#
+# 5. Create MLflow secrets in operator namespace:
+#    kubectl apply -f - <<EOF
+#    apiVersion: v1
+#    kind: Secret
+#    metadata:
+#      name: mlflow-postgres-secret
+#      namespace: redhat-ods-applications
+#    type: Opaque
+#    stringData:
+#      uri: "postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/mlflow"
+#    ---
+#    apiVersion: v1
+#    kind: Secret
+#    metadata:
+#      name: mlflow-s3-secret
+#      namespace: redhat-ods-applications
+#    type: Opaque
+#    stringData:
+#      AWS_ACCESS_KEY_ID: minio
+#      AWS_SECRET_ACCESS_KEY: minio123
+#      MLFLOW_S3_ENDPOINT_URL: http://minio.feast-trainer-demo.svc.cluster.local:9000
+#    EOF
+#
+# 6. Create MLflow CRD:
+#    kubectl apply -f - <<EOF
+#    apiVersion: mlflow.opendatahub.io/v1
+#    kind: MLflow
+#    metadata:
+#      name: mlflow
+#    spec:
+#      backendStoreUriFrom:
+#        name: mlflow-postgres-secret
+#        key: uri
+#      artifactsDestination: "s3://mlflow/artifacts"
+#      serveArtifacts: true
+#      envFrom:
+#      - secretRef:
+#          name: mlflow-s3-secret
+#      resources:
+#        requests:
+#          cpu: 500m
+#          memory: 1Gi
+#        limits:
+#          cpu: 2
+#          memory: 4Gi
+#    EOF
+#
+# 7. Create direct route (bypasses gateway TLS issue):
+#    kubectl apply -f - <<EOF
+#    apiVersion: route.openshift.io/v1
+#    kind: Route
+#    metadata:
+#      name: mlflow-direct
+#      namespace: redhat-ods-applications
+#    spec:
+#      host: mlflow-direct.apps.YOUR-CLUSTER.com
+#      port:
+#        targetPort: 8443
+#      tls:
+#        termination: reencrypt
+#      to:
+#        kind: Service
+#        name: mlflow
+#    EOF
+#
+# =============================================================================
+# MinIO - S3-compatible artifact storage (deployed via kustomize)
+# =============================================================================
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-secret
+  namespace: feast-trainer-demo
+type: Opaque
+stringData:
+  accesskey: minio
+  secretkey: minio123
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: feast-trainer-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: quay.io/minio/minio:latest
+        args: ["server", "/data", "--console-address", ":9001"]
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: accesskey
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: secretkey
+        ports:
+        - containerPort: 9000
+          name: api
+        - containerPort: 9001
+          name: console
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPath: minio-data
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1
+            memory: 1Gi
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                sleep 5
+                mc alias set local http://localhost:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+                mc mb local/mlflow --ignore-existing
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: shared
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: api
+    port: 9000
+  - name: console
+    port: 9001
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: minio-console
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: minio
+  port:
+    targetPort: console
+  tls:
+    termination: edge
+#
+# =============================================================================
+# ACCESS URLs
+# =============================================================================
+#
+# MLflow UI:     https://mlflow-direct.apps.YOUR-CLUSTER.com/mlflow/
+# MinIO Console: https://minio-console-feast-trainer-demo.apps.YOUR-CLUSTER.com
+#
+# =============================================================================
+# SDK Configuration (notebooks/training)
+# =============================================================================
+#
+# MLFLOW_TRACKING_URI=https://mlflow-direct.apps.YOUR-CLUSTER.com/mlflow
+# MLFLOW_WORKSPACE=feast-trainer-demo
+# MLFLOW_TRACKING_TOKEN=$(oc whoami --show-token)
+# MLFLOW_TRACKING_INSECURE_TLS=true
+#
+# pip install "git+https://github.com/red-hat-data-services/mlflow@master"

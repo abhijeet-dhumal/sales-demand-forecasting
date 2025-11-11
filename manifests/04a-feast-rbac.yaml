@@ -1,0 +1,48 @@
+# Feast RBAC - Service Account and Roles
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: feast-sa
+  namespace: feast-trainer-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: feast-rayjob-role
+  namespace: feast-trainer-demo
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["ray.io"]
+  resources: ["rayclusters", "rayjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: feast-rayjob-rolebinding
+  namespace: feast-trainer-demo
+subjects:
+- kind: ServiceAccount
+  name: feast-sa
+  namespace: feast-trainer-demo
+roleRef:
+  kind: Role
+  name: feast-rayjob-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trainjob-ray-access
+  namespace: feast-trainer-demo
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: feast-trainer-demo
+roleRef:
+  kind: Role
+  name: feast-rayjob-role
+  apiGroup: rbac.authorization.k8s.io

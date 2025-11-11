@@ -1,0 +1,220 @@
+# Feast Feature Server - REST API for online features
+---
+# ConfigMap for feature_store.yaml (matches feature_repo/feature_store.yaml)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feast-config
+  namespace: feast-trainer-demo
+data:
+  feature_store.yaml: |
+    project: sales_forecasting
+    provider: local
+    registry:
+      registry_type: sql
+      path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+      cache_ttl_seconds: 60
+    offline_store:
+      type: file
+    online_store:
+      type: postgres
+      host: postgres.feast-trainer-demo.svc.cluster.local
+      port: 5432
+      database: feast
+      db_schema: public
+      user: feast
+      password: feast123
+    entity_key_serialization_version: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feast-server
+  template:
+    metadata:
+      labels:
+        app: feast-server
+    spec:
+      initContainers:
+      # Install dependencies once, share via emptyDir
+      - name: install-deps
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command:
+        - pip
+        - install
+        - --target=/pylibs
+        - -q
+        - feast[postgres]==0.59.0
+        - psycopg2-binary
+        - uvicorn
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+      containers:
+      - name: feast-server
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command: ["feast"]
+        args: ["serve", "-h", "0.0.0.0", "-p", "6566", "--no-access-log"]
+        workingDir: /feast
+        env:
+        - name: PYTHONPATH
+          value: /pylibs
+        - name: PATH
+          value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        ports:
+        - containerPort: 6566
+          name: http
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1
+            memory: 2Gi
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+        - name: feast-config
+          mountPath: /feast
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 6566
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 6566
+          initialDelaySeconds: 60
+          periodSeconds: 30
+      volumes:
+      - name: pylibs
+        emptyDir: {}
+      - name: feast-config
+        configMap:
+          name: feast-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    app: feast-server
+  ports:
+  - name: http
+    port: 6566
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: feast-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+---
+# Feast UI - Web dashboard for feature exploration
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feast-ui
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feast-ui
+  template:
+    metadata:
+      labels:
+        app: feast-ui
+    spec:
+      initContainers:
+      - name: install-deps
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command:
+        - pip
+        - install
+        - --target=/pylibs
+        - -q
+        - feast[postgres]==0.59.0
+        - psycopg2-binary
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+      containers:
+      - name: feast-ui
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command: ["feast"]
+        args: ["ui", "-h", "0.0.0.0", "-p", "8888"]
+        workingDir: /feast
+        env:
+        - name: PYTHONPATH
+          value: /pylibs
+        - name: PATH
+          value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        ports:
+        - containerPort: 8888
+          name: ui
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+        - name: feast-config
+          mountPath: /feast
+      volumes:
+      - name: pylibs
+        emptyDir: {}
+      - name: feast-config
+        configMap:
+          name: feast-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feast-ui
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    app: feast-ui
+  ports:
+  - name: ui
+    port: 8888
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feast-ui
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: feast-ui
+  port:
+    targetPort: ui
+  tls:
+    termination: edge

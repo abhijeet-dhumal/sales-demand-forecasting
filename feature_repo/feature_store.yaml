@@ -1,39 +1,37 @@
-# Feast Feature Store Configuration - Simple Local Setup
-# SQLite for registry, online store, and file-based offline store
+# Feast Feature Store Configuration
+# For feast apply and materialize (file-based offline store)
+#
+# NAMESPACE: feast-trainer-demo
+#
+# Architecture:
+# - Registry: PostgreSQL (SQL-queryable)
+# - Offline Store: File (Parquet) - for apply/materialize
+# - Online Store: PostgreSQL (low-latency serving)
+#
+# NOTE: For distributed training with Ray, use feature_store_ray.yaml
 
-project: sales_demand_forecasting
-
-# SQLite registry (local file-based)
-registry: /shared/feature_repo/data/feast_registry.db
+project: sales_forecasting
 
 provider: local
 
-# SQLite online store for real-time inference
-online_store:
-  type: sqlite
-  path: /shared/feature_repo/data/online_store.db
+# PostgreSQL registry for feature definitions
+registry:
+  registry_type: sql
+  path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+  cache_ttl_seconds: 60
 
-# File-based offline store (simple, no Ray)
+# File-based offline store (for feast apply/materialize)
 offline_store:
   type: file
 
+# PostgreSQL online store for low-latency serving
+online_store:
+  type: postgres
+  host: postgres.feast-trainer-demo.svc.cluster.local
+  port: 5432
+  database: feast
+  db_schema: public
+  user: feast
+  password: feast123
+
 entity_key_serialization_version: 3
-
-
-# For production deployments with high concurrency requirements, you can use:
-# - PostgreSQL for the registry (instead of SQLite)
-# - Ray for distributed offline store (instead of file-based)
-#
-# However, for most use cases, the simple SQLite + file-based setup above is sufficient.
-# The training script uses direct parquet loading which bypasses Feast for speed.
-#
-# # PostgreSQL registry example:
-# # registry:
-# #   registry_type: sql
-# #   path: postgresql+psycopg2://feast:<password>@feast-postgres.<your-namespace>.svc.cluster.local:5432/feast_registry
-# #   cache_ttl_seconds: 60
-#
-# # Ray offline store example:
-# # offline_store:
-# #   type: ray
-# #   storage_path: /shared/models/feast_ray_storage

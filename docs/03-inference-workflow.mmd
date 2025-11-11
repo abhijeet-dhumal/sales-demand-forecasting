@@ -1,0 +1,39 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e3f2fd',
+    'primaryTextColor': '#1a1a1a',
+    'primaryBorderColor': '#90caf9',
+    'lineColor': '#455a64'
+  }
+}}%%
+flowchart LR
+    A["🌐 <b>Request</b><br/><i>{store_id, dept_id}</i>"]
+    B["🍕 <b>Online Features</b><br/><i>Feast Server (~5ms)</i>"]
+    C["⚙️ <b>Scale</b><br/><i>StandardScaler</i>"]
+    D["🎯 <b>Predict</b><br/><i>PyTorch MLP</i>"]
+    E["⚙️ <b>Inverse Scale</b><br/><i>to dollars</i>"]
+    F["✅ <b>Response</b><br/><i>$107,197</i>"]
+
+    A -->|"entity"| B -->|"20 features"| C -->|"scaled"| D -->|"raw"| E -->|"$"| F
+
+    KS["🚀 KServe"]
+    FS["🍕 Feast Server"]
+    PG[("🐘 PostgreSQL")]
+    PVC[("💾 Model")]
+
+    A -.->|"POST"| KS
+    B -.->|"REST"| FS
+    FS -.->|"query"| PG
+    D -.->|"load"| PVC
+
+    style A fill:#e8f5e9,stroke:#81c784,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style D fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style E fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style F fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
+    style KS fill:#fafafa,stroke:#bdbdbd
+    style FS fill:#fafafa,stroke:#bdbdbd
+    style PG fill:#fafafa,stroke:#bdbdbd
+    style PVC fill:#fafafa,stroke:#bdbdbd

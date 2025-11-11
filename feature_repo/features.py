@@ -1,237 +1,198 @@
 """
 Sales Demand Forecasting Feature Definitions
 
-This module defines feature store resources for the Walmart sales forecasting use case.
+This module defines Feast feature store resources for the Walmart-style sales forecasting use case.
 
-Dataset: Real Walmart Sales Forecasting data from Kaggle (421K records)
+Architecture:
+- Registry: PostgreSQL (SQL-queryable)
+- Offline Store: File-based (Parquet) for apply/materialize
+- Online Store: PostgreSQL (low-latency serving)
+- Compute Engine: Ray (distributed get_historical_features)
 
-Key Features:
-- Entities: store, dept (composite key handled by Feature Store)
-- Sales features: weekly_sales, is_holiday, time-series features (lags, rolling averages)
-- External features: temperature, CPI, fuel_price, unemployment, markdowns
-- On-demand features: normalization, interactions, business logic
+Entities:
+- store_id: Store identifier (1-45)
+- dept_id: Department identifier (1-10)
 
-Feature Engineering Pattern:
-- Time-series features pre-computed in download_data.py (ETL pipeline)
-- Feature Store handles feature serving, consistency, and online/offline stores
-- On-demand transformations for runtime feature generation
+Feature Views:
+- sales_features: Weekly sales with lag features, temporal, and economic indicators
+- store_features: Static store metadata (type, size, region)
+
+Feature Services:
+- training_features: Full feature set for model training (includes target)
+- inference_features: Features for inference (excludes target)
+
+Feature Importance (typical retail forecasting):
+- Lag_1, Lag_2        : 35% - Most predictive (recent history)
+- Rolling stats       : 28% - Trend and volatility
+- Week_of_year, Month : 18% - Seasonality patterns
+- Is_holiday          : 10% - Holiday effects
+- Economic indicators :  7% - External factors
+- Store features      :  2% - Store context
 """
 
 from datetime import timedelta
-import pandas as pd
-
-from feast import Entity, FeatureView, Field, FileSource, FeatureService, ValueType
-from feast.types import Float64, Int32, Int64, String
-from feast.on_demand_feature_view import on_demand_feature_view
+from feast import Entity, FeatureView, Field, FileSource, FeatureService
+from feast.types import Float32, Int32, String
 
 
-# ======================================================================================
-# ENTITY DEFINITIONS
-# ======================================================================================
+# =============================================================================
+# ENTITIES
+# =============================================================================
 
 store_entity = Entity(
-    name="store",
-    value_type=ValueType.INT64,
-    description="Walmart store number (1-45). Each store represents a physical retail location.",
-    tags={
-        "owner": "retail_analytics_team",
-        "team": "data_science",
-        "domain": "retail_sales",
-    },
+    name="store_id",
+    description="Store identifier (1-45)",
+    join_keys=["store_id"],
+    tags={"team": "sales", "priority": "high"},
 )
 
 dept_entity = Entity(
-    name="dept",
-    value_type=ValueType.INT64,
-    description="Department number (1-99). Departments represent product categories within stores.",
-    tags={
-        "owner": "retail_analytics_team",
-        "team": "data_science",
-        "domain": "retail_sales",
-    },
+    name="dept_id",
+    description="Department identifier (1-10)",
+    join_keys=["dept_id"],
+    tags={"team": "sales"},
 )
 
 
-# ======================================================================================
-# DATA SOURCES
-# ======================================================================================
+# =============================================================================
+# DATA SOURCES (Parquet files on shared PVC - pre-sorted for fast PIT joins)
+# =============================================================================
+# NOTE: Path depends on mount point:
+#   - RHOAI Workbench: /opt/app-root/src/shared/data/
+#   - TrainJob/Pods:   /shared/data/
 
-# Sales Data Source (with pre-computed time-series features)
+import os
+# Auto-detect mount path: /shared (TrainJob/Ray) vs /opt/app-root/src/shared (Workbench)
+def _get_data_root():
+    if os.environ.get("FEAST_DATA_ROOT"):
+        return os.environ["FEAST_DATA_ROOT"]
+    if os.path.exists("/shared/data"):
+        return "/shared/data"
+    return "/opt/app-root/src/shared/data"
+_DATA_ROOT = _get_data_root()
+
 sales_source = FileSource(
-    name="sales_source",
-    path="/shared/feature_repo/data/sales_features.parquet",
-    timestamp_field="date",
+    path=f"{_DATA_ROOT}/sales_features.parquet",
+    timestamp_field="event_timestamp",
+    description="Weekly sales with optimized features (pre-sorted by entity + timestamp)",
 )
 
-store_external_source = FileSource(
-    name="store_external_source",
-    path="/shared/feature_repo/data/store_features.parquet",
-    timestamp_field="date",
+store_source = FileSource(
+    path=f"{_DATA_ROOT}/store_features.parquet",
+    timestamp_field="event_timestamp",
+    description="Static store metadata",
 )
 
 
-# ======================================================================================
-# SALES HISTORY FEATURE VIEW
-# ======================================================================================
-# Time-series features are pre-computed in the ETL pipeline (download_data.py)
+# =============================================================================
+# FEATURE VIEWS
+# =============================================================================
 
-sales_history_features = FeatureView(
-    name="sales_history_features",
-    description="Historical sales patterns with pre-computed time-series features. "
-                "Features computed in ETL pipeline for efficient serving.",
+sales_features = FeatureView(
+    name="sales_features",
+    description="Weekly sales metrics with optimized features for accurate forecasting",
     entities=[store_entity, dept_entity],
-    ttl=timedelta(days=730),
+    ttl=timedelta(days=90),
     schema=[
-        # Base features
-        Field(
-            name="weekly_sales",
-            dtype=Float64,
-            description="Weekly sales amount in USD"
-        ),
-        Field(
-            name="is_holiday",
-            dtype=Int64,
-            description="Binary indicator (0/1) for holiday weeks"
-        ),
-        # Time-series features (pre-computed)
-        Field(
-            name="sales_lag_1",
-            dtype=Float64,
-            description="Sales from 1 week ago (t-1)"
-        ),
-        Field(
-            name="sales_lag_2",
-            dtype=Float64,
-            description="Sales from 2 weeks ago (t-2)"
-        ),
-        Field(
-            name="sales_lag_4",
-            dtype=Float64,
-            description="Sales from 4 weeks ago (t-4)"
-        ),
-        Field(
-            name="sales_rolling_mean_4",
-            dtype=Float64,
-            description="4-week rolling average of sales"
-        ),
-        Field(
-            name="sales_rolling_mean_12",
-            dtype=Float64,
-            description="12-week rolling average of sales"
-        ),
-        Field(
-            name="sales_rolling_std_4",
-            dtype=Float64,
-            description="4-week rolling standard deviation (volatility measure)"
-        ),
+        # Target variable
+        Field(name="weekly_sales", dtype=Float32, description="Weekly sales amount ($)"),
+        
+        # === LAG FEATURES (35% importance) - Recent history ===
+        Field(name="lag_1", dtype=Float32, description="Sales from 1 week ago"),
+        Field(name="lag_2", dtype=Float32, description="Sales from 2 weeks ago"),
+        Field(name="lag_4", dtype=Float32, description="Sales from 4 weeks ago"),
+        Field(name="lag_8", dtype=Float32, description="Sales from 8 weeks ago"),
+        
+        # === ROLLING STATISTICS (28% importance) - Trend & volatility ===
+        Field(name="rolling_mean_4w", dtype=Float32, description="4-week rolling average"),
+        Field(name="rolling_std_4w", dtype=Float32, description="4-week rolling std (volatility)"),
+        Field(name="sales_vs_avg", dtype=Float32, description="Current/rolling_mean ratio (momentum)"),
+        
+        # === TEMPORAL FEATURES (18% importance) - Seasonality ===
+        Field(name="week_of_year", dtype=Int32, description="Week 1-52 (yearly seasonality)"),
+        Field(name="month", dtype=Int32, description="Month 1-12"),
+        Field(name="quarter", dtype=Int32, description="Quarter 1-4 (Q4 retail boost)"),
+        Field(name="week_of_month", dtype=Int32, description="Week 1-5 within month"),
+        Field(name="is_month_end", dtype=Int32, description="Last week of month (0/1)"),
+        
+        # === HOLIDAY FEATURES (10% importance) ===
+        Field(name="is_holiday", dtype=Int32, description="Holiday week indicator (0/1)"),
+        Field(name="days_to_holiday", dtype=Int32, description="Days until next major holiday"),
+        
+        # === ECONOMIC INDICATORS (7% importance) ===
+        Field(name="temperature", dtype=Float32, description="Regional temperature (°F)"),
+        Field(name="fuel_price", dtype=Float32, description="Fuel price ($/gallon)"),
+        Field(name="cpi", dtype=Float32, description="Consumer Price Index"),
+        Field(name="unemployment", dtype=Float32, description="Unemployment rate (%)"),
     ],
     source=sales_source,
     online=True,
-    tags={
-        "owner": "retail_analytics_team",
-        "team": "data_science",
-        "priority": "critical",
-        "feature_category": "time_series",
-        "etl": "pre_computed",
-    },
+    tags={"type": "time_series", "domain": "sales"},
 )
 
-
-# Store external features
-store_external_features = FeatureView(
-    name="store_external_features",
-    description="Store-level external factors.",
-    entities=[store_entity, dept_entity],  # Multiple entities = composite key
-    ttl=timedelta(days=730),
+store_features = FeatureView(
+    name="store_features",
+    description="Static store metadata",
+    entities=[store_entity, dept_entity],
+    ttl=timedelta(days=365),
     schema=[
-        Field(name="temperature", dtype=Float64),
-        Field(name="fuel_price", dtype=Float64),
-        Field(name="cpi", dtype=Float64),
-        Field(name="unemployment", dtype=Float64),
-        Field(name="markdown1", dtype=Float64),
-        Field(name="markdown2", dtype=Float64),
-        Field(name="markdown3", dtype=Float64),
-        Field(name="markdown4", dtype=Float64),
-        Field(name="markdown5", dtype=Float64),
-        Field(name="total_markdown", dtype=Float64),
-        Field(name="has_markdown", dtype=Int32),
-        Field(name="store_type", dtype=String),
-        Field(name="store_size", dtype=Int64),
+        Field(name="store_type", dtype=String, description="Store type: A, B, or C"),
+        Field(name="store_size", dtype=Int32, description="Store square footage"),
+        Field(name="region", dtype=String, description="Geographic region"),
     ],
-    source=store_external_source,
-    tags={
-        "owner": "retail_analytics_team",
-        "feature_category": "external_contextual",
-    },
+    source=store_source,
     online=True,
+    tags={"type": "dimension", "domain": "store"},
 )
 
 
-# ======================================================================================
-# ON-DEMAND TRANSFORMATIONS
-# ======================================================================================
-# Runtime feature transformations applied during feature retrieval
-
-@on_demand_feature_view(
-    sources=[sales_history_features, store_external_features],
-    schema=[
-        Field(name="sales_normalized", dtype=Float64),
-        Field(name="temperature_normalized", dtype=Float64),
-        Field(name="sales_per_sqft", dtype=Float64),
-        Field(name="markdown_efficiency", dtype=Float64),
-    ],
-    description="Runtime normalization and interaction features",
-)
-def feature_transformations(inputs: pd.DataFrame) -> pd.DataFrame:
-    df = pd.DataFrame()
-    df["sales_normalized"] = inputs["weekly_sales"].clip(0, 200000) / 200000
-    df["temperature_normalized"] = ((inputs["temperature"] - 5) / 95).clip(0, 1)
-    df["sales_per_sqft"] = inputs["weekly_sales"] / (inputs["store_size"] + 1)
-    df["markdown_efficiency"] = inputs["weekly_sales"] / (inputs["total_markdown"] + 1)
-    return df
-
-
-@on_demand_feature_view(
-    sources=[sales_history_features],
-    schema=[
-        Field(name="sales_velocity", dtype=Float64),
-        Field(name="sales_acceleration", dtype=Float64),
-        Field(name="demand_stability_score", dtype=Float64),
-    ],
-    description="Temporal features using pre-computed lags and rolling features",
-)
-def temporal_transformations(inputs: pd.DataFrame) -> pd.DataFrame:
-    """Compute velocity, acceleration, and stability from pre-computed time-series features."""
-    df = pd.DataFrame()
-    df["sales_velocity"] = (
-        (inputs["sales_lag_1"] - inputs["sales_lag_2"]) / (inputs["sales_lag_2"] + 1)
-    )
-    velocity_prev = (inputs["sales_lag_2"] - inputs["sales_lag_4"]) / (inputs["sales_lag_4"] + 1)
-    df["sales_acceleration"] = df["sales_velocity"] - velocity_prev
-    df["demand_stability_score"] = 1 - (
-        inputs["sales_rolling_std_4"] / (inputs["sales_rolling_mean_4"] + 1)
-    ).clip(0, 1)
-    return df
-
-
-# ======================================================================================
+# =============================================================================
 # FEATURE SERVICES
-# ======================================================================================
+# =============================================================================
 
-demand_forecasting_service = FeatureService(
-    name="demand_forecasting_service",
-    description="Complete feature set for sales demand forecasting. "
-                "Includes pre-computed time-series features + external factors + on-demand transformations.",
+# Training: includes target variable (weekly_sales)
+# Optimized feature set for maximum prediction accuracy
+training_features = FeatureService(
+    name="training_features",
+    description="Optimized feature set for model training (includes target)",
     features=[
-        sales_history_features,  # Sales + pre-computed time-series features
-        store_external_features,  # External factors (temperature, CPI, etc.)
-        feature_transformations,  # On-demand: normalization, interactions
-        temporal_transformations,  # On-demand: velocity, acceleration, stability
+        sales_features[[
+            # Target
+            "weekly_sales",
+            # Lag features (35% importance)
+            "lag_1", "lag_2", "lag_4", "lag_8",
+            # Rolling stats (28% importance)
+            "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+            # Temporal (18% importance)
+            "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+            # Holiday (10% importance)
+            "is_holiday", "days_to_holiday",
+            # Economic (7% importance)
+            "temperature", "fuel_price", "cpi", "unemployment",
+        ]],
+        store_features[["store_type", "store_size", "region"]],
     ],
-    tags={
-        "owner": "retail_analytics_team",
-        "use_case": "demand_forecasting",
-        "pattern": "etl_precompute",
-    },
+    tags={"stage": "training", "model": "demand-forecasting", "version": "v2-optimized"},
 )
 
+# Inference: excludes target variable
+inference_features = FeatureService(
+    name="inference_features",
+    description="Features for real-time inference (excludes target)",
+    features=[
+        sales_features[[
+            # Lag features
+            "lag_1", "lag_2", "lag_4", "lag_8",
+            # Rolling stats
+            "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+            # Temporal
+            "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+            # Holiday
+            "is_holiday", "days_to_holiday",
+            # Economic
+            "temperature", "fuel_price", "cpi", "unemployment",
+        ]],
+        store_features[["store_type", "store_size", "region"]],
+    ],
+    tags={"stage": "inference", "model": "demand-forecasting", "version": "v2-optimized"},
+)
