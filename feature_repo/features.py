@@ -93,6 +93,22 @@ sales_history_features = FeatureView(
             dtype=Int64,
             description="Binary indicator (0/1) for holiday weeks"
         ),
+        # Temporal features (pre-computed)
+        Field(
+            name="week_of_year",
+            dtype=Int64,
+            description="Week number (1-52) for seasonality patterns"
+        ),
+        Field(
+            name="month",
+            dtype=Int64,
+            description="Month (1-12) for monthly seasonality"
+        ),
+        Field(
+            name="quarter",
+            dtype=Int64,
+            description="Quarter (1-4) for quarterly patterns"
+        ),
         # Time-series features (pre-computed)
         Field(
             name="sales_lag_1",
@@ -179,15 +195,33 @@ store_external_features = FeatureView(
         Field(name="temperature_normalized", dtype=Float64),
         Field(name="sales_per_sqft", dtype=Float64),
         Field(name="markdown_efficiency", dtype=Float64),
+        Field(name="holiday_markdown_interaction", dtype=Float64),
+        Field(name="markdown_momentum", dtype=Float64),
+        Field(name="seasonal_sine", dtype=Float64),
+        Field(name="seasonal_cosine", dtype=Float64),
     ],
-    description="Runtime normalization and interaction features",
+    description="Runtime normalization and interaction features with seasonal patterns",
 )
 def feature_transformations(inputs: pd.DataFrame) -> pd.DataFrame:
+    import numpy as np
     df = pd.DataFrame()
+    
+    # Original features
     df["sales_normalized"] = inputs["weekly_sales"].clip(0, 200000) / 200000
     df["temperature_normalized"] = ((inputs["temperature"] - 5) / 95).clip(0, 1)
     df["sales_per_sqft"] = inputs["weekly_sales"] / (inputs["store_size"] + 1)
     df["markdown_efficiency"] = inputs["weekly_sales"] / (inputs["total_markdown"] + 1)
+    
+    # NEW: Critical interaction - holidays with markdowns drive huge lift
+    df["holiday_markdown_interaction"] = inputs["is_holiday"] * inputs["total_markdown"]
+    
+    # NEW: Markdown momentum - how aggressive is current promotion vs historical sales
+    df["markdown_momentum"] = inputs["total_markdown"] / (inputs["sales_lag_1"] + 1)
+    
+    # NEW: Seasonal patterns using sine/cosine encoding (better than raw week numbers)
+    df["seasonal_sine"] = np.sin(2 * np.pi * inputs["week_of_year"] / 52)
+    df["seasonal_cosine"] = np.cos(2 * np.pi * inputs["week_of_year"] / 52)
+    
     return df
 
 

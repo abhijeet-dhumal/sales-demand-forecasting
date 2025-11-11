@@ -8,7 +8,9 @@ A distributed ML pipeline for retail demand forecasting using PyTorch DDP, Kubef
 
 **11.5% forecast error (vs 15-20% industry baseline) → 40% improvement → Drives 20% inventory cost reduction + 15% fewer stockouts + 10-15% payroll optimization**
 
-Real retail data (421k Walmart records), production-ready ML pipeline on OpenShift AI, 2-minute distributed training, actionable weekly forecasts.
+Real retail data (421k Walmart records), production-ready ML pipeline on OpenShift AI, **~15-20 min** distributed training (100K sample quickstart), actionable weekly forecasts.
+
+**🚀 Quickstart:** Run all 3 notebooks in ~45 minutes total (data prep + training + inference)
 
 ---
 

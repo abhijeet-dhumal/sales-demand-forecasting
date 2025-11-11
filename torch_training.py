@@ -158,8 +158,15 @@ def training_func(parameters=None):
                     X = X[indices]
                     y = y[indices]
                 
-                for i in range(len(X)):
-                    yield torch.from_numpy(X[i]), torch.tensor(y[i])
+                # OPTIMIZATION: Batch tensor creation (faster than per-row)
+                batch_size_chunk = 1024
+                for start_idx in range(0, len(X), batch_size_chunk):
+                    end_idx = min(start_idx + batch_size_chunk, len(X))
+                    X_batch = torch.from_numpy(X[start_idx:end_idx])
+                    y_batch = torch.from_numpy(y[start_idx:end_idx])
+                    
+                    for i in range(len(X_batch)):
+                        yield X_batch[i], y_batch[i]
                 
                 del df, X, y
     
@@ -186,6 +193,111 @@ def training_func(parameters=None):
         
         def forward(self, x):
             return self.network(x)
+    
+    class TemporalFusionTransformer(nn.Module):
+        """
+        Simplified Temporal Fusion Transformer for sales forecasting.
+        
+        Key components:
+        - Variable Selection Networks (choose important features)
+        - LSTM for temporal processing
+        - Multi-head Self-Attention for temporal relationships
+        - Gated Residual Network for non-linear processing
+        """
+        
+        def __init__(self, input_dim, hidden_size=128, num_heads=4, lstm_layers=2, dropout=0.1):
+            super().__init__()
+            self.input_dim = input_dim
+            self.hidden_size = hidden_size
+            self.num_heads = num_heads
+            
+            # Variable selection (learns which features are important)
+            self.variable_selection = nn.Sequential(
+                nn.Linear(input_dim, hidden_size),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_size, input_dim),
+                nn.Softmax(dim=-1)
+            )
+            
+            # Feature projection
+            self.feature_projection = nn.Linear(input_dim, hidden_size)
+            
+            # LSTM for temporal dependencies
+            self.lstm = nn.LSTM(
+                hidden_size,
+                hidden_size,
+                num_layers=lstm_layers,
+                dropout=dropout if lstm_layers > 1 else 0,
+                batch_first=True
+            )
+            
+            # Self-attention for temporal relationships
+            self.attention = nn.MultiheadAttention(
+                hidden_size,
+                num_heads,
+                dropout=dropout,
+                batch_first=True
+            )
+            
+            # Gated Residual Network (mixing LSTM + attention)
+            self.gate = nn.Sequential(
+                nn.Linear(hidden_size * 2, hidden_size),
+                nn.GLU(dim=-1)
+            )
+            
+            # Output layers
+            self.output_network = nn.Sequential(
+                nn.Linear(hidden_size // 2, hidden_size),
+                nn.LayerNorm(hidden_size),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_size, 1)
+            )
+            
+            self.dropout = nn.Dropout(dropout)
+            self.layer_norm1 = nn.LayerNorm(hidden_size)
+            self.layer_norm2 = nn.LayerNorm(hidden_size)
+        
+        def forward(self, x):
+            """
+            Args:
+                x: Input tensor [batch_size, input_dim]
+            Returns:
+                Output tensor [batch_size, 1]
+            """
+            batch_size = x.size(0)
+            
+            # Variable selection: Which features matter most?
+            var_weights = self.variable_selection(x)  # [batch, input_dim]
+            x_selected = x * var_weights  # Weighted features
+            
+            # Project to hidden size
+            x_proj = self.feature_projection(x_selected)  # [batch, hidden_size]
+            
+            # Add temporal dimension (treat each sample as sequence of length 1)
+            # In production, you'd reshape to [batch, seq_len, hidden]
+            x_seq = x_proj.unsqueeze(1)  # [batch, 1, hidden_size]
+            
+            # LSTM processing
+            lstm_out, _ = self.lstm(x_seq)  # [batch, 1, hidden_size]
+            lstm_out = self.dropout(lstm_out)
+            lstm_out = self.layer_norm1(lstm_out + x_seq)  # Residual
+            
+            # Self-attention
+            attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+            attn_out = self.dropout(attn_out)
+            attn_out = self.layer_norm2(attn_out + lstm_out)  # Residual
+            
+            # Gated fusion of LSTM + Attention
+            combined = torch.cat([lstm_out, attn_out], dim=-1)  # [batch, 1, hidden*2]
+            gated = self.gate(combined)  # [batch, 1, hidden//2]
+            
+            # Output prediction
+            gated = gated.squeeze(1)  # [batch, hidden//2]
+            output = self.output_network(gated)  # [batch, 1]
+            
+            return output.squeeze(-1)  # [batch]
     
     def load_features_feast_file(feast_repo_path, data_path, output_cache_dir, chunk_size, sample_size):
         """
@@ -626,11 +738,31 @@ def training_func(parameters=None):
                     epochs_without_improvement = 0
                     if rank == 0:
                         model_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                        
+                        # Save model config based on type
+                        if model_type == "tft":
+                            model_config = {
+                                "model_type": "tft",
+                                "input_dim": input_dim,
+                                "tft_hidden_size": tft_hidden_size,
+                                "tft_num_heads": tft_num_heads,
+                                "tft_lstm_layers": tft_lstm_layers,
+                                "tft_dropout": tft_dropout,
+                            }
+                        else:
+                            model_config = {
+                                "model_type": "mlp",
+                                "input_dim": input_dim,
+                                "hidden_dims": hidden_dims,
+                                "dropout": dropout,
+                            }
+                        
                         torch.save({
                             "MODEL_STATE": model_state,
                             "OPTIMIZER_STATE": optimizer.state_dict(),
                             "EPOCH": epoch,
                             "VAL_LOSS": val_loss,
+                            "MODEL_CONFIG": model_config,
                         }, snapshot_path)
                         logger.info(f"Saved best model (val_loss={val_loss:.4f})")
                 else:
@@ -683,6 +815,12 @@ def training_func(parameters=None):
                 "MODEL_STATE": model_state,
                 "OPTIMIZER_STATE": optimizer.state_dict(),
                 "EPOCH": epochs - 1,
+                "MODEL_CONFIG": {  # ADD: Save architecture info
+                    "model_type": "mlp",
+                    "input_dim": input_dim,
+                    "hidden_dims": hidden_dims,
+                    "dropout": dropout,
+                },
             }, snapshot_path)
             logger.info(f"Saved final model after {epochs} epochs")
         
@@ -797,7 +935,9 @@ def training_func(parameters=None):
     )
     
     use_gpu = device_type in ['cuda', 'hip']
-    num_workers = 0
+    # OPTIMIZATION: Parallel data loading (4 workers keep GPU fed while processing)
+    num_workers = 4 if use_gpu else 0
+    prefetch_factor = 2 if num_workers > 0 else None
     
     # AMP only supported on NVIDIA GPUs (not AMD ROCm or CPU)
     use_amp = use_amp and device_type == 'cuda'
@@ -809,16 +949,44 @@ def training_func(parameters=None):
         train_dataset,
         batch_size=batch_size,
         pin_memory=use_gpu,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=True if num_workers > 0 else False,
     )
     
     val_loader = DataLoaderClass(
         val_dataset,
         batch_size=batch_size,
         pin_memory=use_gpu,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=True if num_workers > 0 else False,
     )
     
     input_dim = len(feature_cols)
-    model = SalesForecastingMLP(input_dim=input_dim, hidden_dims=hidden_dims, dropout=dropout)
+    
+    # Model selection based on model_type parameter
+    model_type = parameters.get("model_type", "mlp")
+    
+    if model_type == "tft":
+        # Temporal Fusion Transformer
+        tft_hidden_size = parameters.get("tft_hidden_size", 128)
+        tft_num_heads = parameters.get("tft_num_heads", 4)
+        tft_lstm_layers = parameters.get("tft_lstm_layers", 2)
+        tft_dropout = parameters.get("tft_dropout", 0.1)
+        
+        model = TemporalFusionTransformer(
+            input_dim=input_dim,
+            hidden_size=tft_hidden_size,
+            num_heads=tft_num_heads,
+            lstm_layers=tft_lstm_layers,
+            dropout=tft_dropout
+        )
+        logger.info(f"Using TFT: hidden={tft_hidden_size}, heads={tft_num_heads}, lstm_layers={tft_lstm_layers}")
+    else:
+        # Default: MLP
+        model = SalesForecastingMLP(input_dim=input_dim, hidden_dims=hidden_dims, dropout=dropout)
+        logger.info(f"Using MLP: hidden_dims={hidden_dims}")
     
     if use_gpu:
         current_device = torch.cuda.current_device()
