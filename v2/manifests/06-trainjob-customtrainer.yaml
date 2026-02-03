@@ -1,0 +1,114 @@
+# TrainJob v2 using CustomTrainer pattern (SDK-generated style)
+# This shows what the SDK generates when you use CustomTrainer
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-forecast-custom
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: sales-forecasting
+    trainer.kubeflow.org/trainer-type: custom
+spec:
+  runtimeRef:
+    name: torch-distributed
+    apiGroup: trainer.kubeflow.org
+    kind: ClusterTrainingRuntime
+  
+  trainer:
+    numNodes: 2
+    numProcPerNode: 1
+    
+    # SDK injects the training function as a base64-encoded script
+    image: quay.io/modh/training:py311-cuda124-torch251
+    
+    command:
+    - /bin/bash
+    - -c
+    args:
+    - |
+      # Install required packages
+      pip install torch>=2.4.0 pandas>=2.2.0 pyarrow>=15.0.0 scikit-learn>=1.5.0 joblib>=1.4.0
+      
+      # Run the training script
+      python -c "
+      $(cat << 'TRAINING_SCRIPT'
+      # Self-contained training function (SDK serializes this)
+      import os
+      import torch
+      import torch.distributed as dist
+      import torch.nn as nn
+      from torch.nn.parallel import DistributedDataParallel as DDP
+      from torch.utils.data import DataLoader, Dataset, DistributedSampler
+      import pandas as pd
+      import numpy as np
+      from sklearn.preprocessing import StandardScaler
+      import joblib
+      
+      # DDP setup
+      backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+      dist.init_process_group(backend=backend)
+      rank = dist.get_rank()
+      local_rank = int(os.environ.get('LOCAL_RANK', 0))
+      device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+      
+      # Model definition
+      class SalesMLP(nn.Module):
+          def __init__(self, input_dim):
+              super().__init__()
+              self.network = nn.Sequential(
+                  nn.Linear(input_dim, 256), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(64, 1)
+              )
+          def forward(self, x):
+              return self.network(x).squeeze(-1)
+      
+      # Load data (rank 0 only)
+      if rank == 0:
+          df = pd.read_parquet('/shared/data/features.parquet')
+          # ... preprocessing ...
+          print('Data loaded, starting training')
+      
+      dist.barrier()
+      # ... training loop ...
+      
+      dist.destroy_process_group()
+      TRAINING_SCRIPT
+      )
+      "
+    
+    env:
+    - name: DATA_PATH
+      value: /shared/data
+    - name: OUTPUT_DIR
+      value: /models
+    - name: NUM_EPOCHS
+      value: "10"
+    
+    resourcesPerNode:
+      requests:
+        cpu: 4
+        memory: 16Gi
+      limits:
+        cpu: 8
+        memory: 32Gi
+  
+  podTemplateOverrides:
+  - targetJob:
+      name: trainer
+    containers:
+    - name: trainer
+      volumeMounts:
+      - name: shared-storage
+        mountPath: /shared
+      - name: model-storage
+        mountPath: /models
+    volumes:
+    - name: shared-storage
+      persistentVolumeClaim:
+        claimName: shared-storage
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: model-storage
+

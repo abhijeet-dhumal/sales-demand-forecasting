@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-storage
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: sales-forecasting
+spec:
+  accessModes:
+    - ReadWriteMany  # Required for multi-node training
+  storageClassName: nfs-csi
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: sales-forecasting
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  resources:
+    requests:
+      storage: 10Gi
+

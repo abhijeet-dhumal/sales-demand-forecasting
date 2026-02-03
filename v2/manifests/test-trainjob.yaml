@@ -1,0 +1,44 @@
+# Simple test TrainJob using torch-distributed runtime
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: test-training
+  namespace: feast-trainer-demo
+spec:
+  runtimeRef:
+    name: torch-distributed
+  trainer:
+    numNodes: 1
+    resourcesPerNode:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    env:
+    - name: TRAIN_SCRIPT
+      value: |
+        import torch
+        import torch.distributed as dist
+        import os
+        
+        backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        dist.init_process_group(backend=backend)
+        
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        
+        print(f"Hello from rank {rank}/{world_size}!")
+        print(f"PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
+        
+        x = torch.randn(100, 100)
+        y = torch.matmul(x, x.T)
+        print(f"Rank {rank}: tensor shape {y.shape}")
+        
+        dist.destroy_process_group()
+        print("Done!")
+    command:
+    - bash
+    - -c
+    - 'echo "$TRAIN_SCRIPT" > /tmp/train.py && torchrun --nnodes=$PET_NNODES --nproc_per_node=$PET_NPROC_PER_NODE --node_rank=$PET_NODE_RANK --rdzv_backend=c10d --rdzv_endpoint=$PET_MASTER_ADDR:$PET_MASTER_PORT /tmp/train.py'

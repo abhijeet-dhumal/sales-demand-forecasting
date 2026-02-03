@@ -1,0 +1,19 @@
+# Feast Feature Store Configuration
+# - Registry: PostgreSQL (centralized metadata)
+# - Offline Store: File (Parquet for historical features)
+# - Online Store: PostgreSQL (low-latency serving)
+project: sales_forecasting
+provider: local
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://feast:feast123@feast-postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+offline_store:
+  type: file
+online_store:
+  type: postgres
+  host: feast-postgres.feast-trainer-demo.svc.cluster.local
+  port: 5432
+  database: feast
+  user: feast
+  password: feast123
+entity_key_serialization_version: 2

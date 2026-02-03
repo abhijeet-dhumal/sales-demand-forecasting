@@ -1,0 +1,321 @@
+# TrainJob v2 with Feast Feature Retrieval
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-forecasting
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: sales-forecasting
+spec:
+  runtimeRef:
+    name: torch-with-storage
+  
+  trainer:
+    numNodes: 1
+    
+    resourcesPerNode:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        cpu: "8"
+        memory: 16Gi
+    
+    env:
+    - name: FEATURE_REPO
+      value: /shared/feature_repo
+    - name: DATA_PATH
+      value: /shared/data
+    - name: OUTPUT_DIR
+      value: /shared/models
+    - name: NUM_EPOCHS
+      value: "10"
+    - name: VAL_START_DATE
+      value: "2012-01-01"
+    # PostgreSQL connection for Feast
+    - name: POSTGRES_HOST
+      value: feast-postgres.feast-trainer-demo.svc.cluster.local
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          name: feast-postgres-secret
+          key: username
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: feast-postgres-secret
+          key: password
+    
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      pip install --quiet "feast[postgres]==0.40.0" psycopg2-binary scikit-learn joblib
+      
+      # Create feature store config pointing to PostgreSQL
+      mkdir -p $FEATURE_REPO
+      cat > $FEATURE_REPO/feature_store.yaml << EOF
+      project: sales_forecasting
+      provider: local
+      registry:
+        registry_type: sql
+        path: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:5432/feast
+      offline_store:
+        type: file
+      online_store:
+        type: postgres
+        host: $POSTGRES_HOST
+        port: 5432
+        database: feast
+        user: $POSTGRES_USER
+        password: $POSTGRES_PASSWORD
+      entity_key_serialization_version: 2
+      EOF
+      
+      cat > /tmp/train.py << 'TRAIN_SCRIPT'
+      import os
+      import logging
+      import numpy as np
+      import pandas as pd
+      import torch
+      import torch.nn as nn
+      import torch.distributed as dist
+      from torch.nn.parallel import DistributedDataParallel as DDP
+      from torch.utils.data import DataLoader, Dataset, DistributedSampler
+      from sklearn.preprocessing import StandardScaler
+      import joblib
+      from feast import FeatureStore
+      
+      logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+      logger = logging.getLogger(__name__)
+      
+      FEATURE_REPO = os.environ.get("FEATURE_REPO", "/shared/feature_repo")
+      DATA_PATH = os.environ.get("DATA_PATH", "/shared/data")
+      OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/shared/models")
+      NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 10))
+      VAL_START_DATE = os.environ.get("VAL_START_DATE", "2012-01-01")
+      
+      # =================================================================
+      # MODEL DEFINITION
+      # =================================================================
+      class SalesMLP(nn.Module):
+          def __init__(self, input_dim):
+              super().__init__()
+              self.net = nn.Sequential(
+                  nn.Linear(input_dim, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(256, 128), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(128, 64), nn.BatchNorm1d(64), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(64, 1)
+              )
+          def forward(self, x):
+              return self.net(x).squeeze(-1)
+      
+      class SalesDS(Dataset):
+          def __init__(self, X, y):
+              self.X = torch.tensor(X, dtype=torch.float32)
+              self.y = torch.tensor(y, dtype=torch.float32)
+          def __len__(self): return len(self.X)
+          def __getitem__(self, i): return self.X[i], self.y[i]
+      
+      # =================================================================
+      # DDP SETUP
+      # =================================================================
+      backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+      dist.init_process_group(backend=backend)
+      rank, world = dist.get_rank(), dist.get_world_size()
+      local_rank = int(os.environ.get("LOCAL_RANK", 0))
+      device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+      logger.info(f"DDP: rank={rank}/{world}, device={device}")
+      
+      # =================================================================
+      # FEATURE RETRIEVAL VIA FEAST
+      # =================================================================
+      if rank == 0:
+          os.makedirs(OUTPUT_DIR, exist_ok=True)
+          
+          logger.info("=" * 60)
+          logger.info("FETCHING FEATURES FROM FEAST")
+          logger.info("=" * 60)
+          
+          # Initialize Feast store
+          store = FeatureStore(repo_path=FEATURE_REPO)
+          logger.info(f"Connected to Feast registry")
+          
+          # Load entity dataframe
+          entity_df = pd.read_parquet(f"{DATA_PATH}/entities.parquet")
+          entity_df["date"] = pd.to_datetime(entity_df["date"])
+          entity_df = entity_df.rename(columns={"date": "event_timestamp"})
+          
+          logger.info(f"Entity DataFrame: {len(entity_df)} rows")
+          
+          # Get historical features using point-in-time join
+          logger.info("Fetching historical features (point-in-time join)...")
+          training_df = store.get_historical_features(
+              entity_df=entity_df,
+              features=[
+                  # Sales features
+                  "sales_features:lag_1",
+                  "sales_features:lag_2",
+                  "sales_features:lag_4",
+                  "sales_features:lag_8",
+                  "sales_features:lag_52",
+                  "sales_features:rolling_mean_4w",
+                  "sales_features:rolling_std_4w",
+                  "sales_features:rolling_mean_8w",
+                  "sales_features:rolling_std_8w",
+                  "sales_features:rolling_mean_52w",
+                  # Store features
+                  "store_features:store_size",
+                  "store_features:temperature",
+                  "store_features:fuel_price",
+                  "store_features:cpi",
+                  "store_features:unemployment",
+                  "store_features:markdown1",
+                  "store_features:markdown2",
+                  "store_features:markdown3",
+                  "store_features:markdown4",
+                  "store_features:markdown5",
+                  "store_features:is_holiday",
+                  "store_features:week_of_year",
+                  "store_features:month",
+              ],
+          ).to_df()
+          
+          logger.info(f"Features retrieved: {len(training_df)} rows, {len(training_df.columns)} columns")
+          
+          # Load target variable
+          full_df = pd.read_parquet(f"{DATA_PATH}/features.parquet")
+          full_df["date"] = pd.to_datetime(full_df["date"])
+          
+          # Convert to UTC for merge (Feast returns UTC timestamps)
+          training_df["event_timestamp"] = training_df["event_timestamp"].dt.tz_localize(None)
+          
+          training_df = training_df.merge(
+              full_df[["store_id", "dept_id", "date", "weekly_sales"]].rename(columns={"date": "event_timestamp"}),
+              on=["store_id", "dept_id", "event_timestamp"],
+              how="left"
+          )
+          
+          # Temporal split
+          val_date = pd.to_datetime(VAL_START_DATE)
+          train_df = training_df[training_df["event_timestamp"] < val_date]
+          val_df = training_df[training_df["event_timestamp"] >= val_date]
+          
+          logger.info(f"Train: {len(train_df)}, Val: {len(val_df)}")
+          
+          # Feature columns
+          feature_cols = [c for c in training_df.columns 
+                          if c not in ["store_id", "dept_id", "event_timestamp", "weekly_sales"]
+                          and training_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+          
+          logger.info(f"Feature columns: {len(feature_cols)}")
+          
+          X_train = train_df[feature_cols].fillna(0).values
+          y_train = train_df["weekly_sales"].values
+          X_val = val_df[feature_cols].fillna(0).values
+          y_val = val_df["weekly_sales"].values
+          
+          # Scale features
+          scaler = StandardScaler()
+          X_train = scaler.fit_transform(X_train)
+          X_val = scaler.transform(X_val)
+          
+          # Scale target
+          y_scaler = StandardScaler()
+          y_train = y_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+          y_val = y_scaler.transform(y_val.reshape(-1, 1)).flatten()
+          
+          # Save scalers
+          joblib.dump(scaler, f"{OUTPUT_DIR}/scaler.pkl")
+          joblib.dump(y_scaler, f"{OUTPUT_DIR}/y_scaler.pkl")
+          joblib.dump(feature_cols, f"{OUTPUT_DIR}/feature_cols.pkl")
+          
+          # Save for other ranks
+          np.save(f"{OUTPUT_DIR}/.X_train.npy", X_train)
+          np.save(f"{OUTPUT_DIR}/.y_train.npy", y_train)
+          np.save(f"{OUTPUT_DIR}/.X_val.npy", X_val)
+          np.save(f"{OUTPUT_DIR}/.y_val.npy", y_val)
+          
+          logger.info("Features preprocessed and saved")
+      
+      dist.barrier()
+      
+      # Load data on all ranks
+      X_train = np.load(f"{OUTPUT_DIR}/.X_train.npy")
+      y_train = np.load(f"{OUTPUT_DIR}/.y_train.npy")
+      X_val = np.load(f"{OUTPUT_DIR}/.X_val.npy")
+      y_val = np.load(f"{OUTPUT_DIR}/.y_val.npy")
+      
+      dist.barrier()
+      
+      # =================================================================
+      # TRAINING
+      # =================================================================
+      logger.info("=" * 60)
+      logger.info("TRAINING MODEL")
+      logger.info("=" * 60)
+      
+      train_ds, val_ds = SalesDS(X_train, y_train), SalesDS(X_val, y_val)
+      sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank)
+      train_ld = DataLoader(train_ds, batch_size=256, sampler=sampler, num_workers=2)
+      val_ld = DataLoader(val_ds, batch_size=256, shuffle=False, num_workers=2)
+      
+      model = DDP(SalesMLP(X_train.shape[1]).to(device), device_ids=[local_rank] if torch.cuda.is_available() else None)
+      opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+      sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=2)
+      criterion = nn.MSELoss()
+      best = float("inf")
+      
+      for ep in range(NUM_EPOCHS):
+          sampler.set_epoch(ep)
+          model.train()
+          tloss = 0.0
+          for X, y in train_ld:
+              X, y = X.to(device), y.to(device)
+              opt.zero_grad()
+              out = model(X)
+              loss = criterion(out, y)
+              loss.backward()
+              torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+              opt.step()
+              tloss += loss.item()
+          tloss /= len(train_ld)
+          
+          model.eval()
+          vloss, preds, acts = 0, [], []
+          with torch.no_grad():
+              for X, y in val_ld:
+                  out = model(X.to(device))
+                  vloss += criterion(out, y.to(device)).item()
+                  preds.extend(out.cpu().numpy())
+                  acts.extend(y.numpy())
+          vloss /= len(val_ld)
+          sched.step(vloss)
+          
+          if rank == 0:
+              preds, acts = np.array(preds), np.array(acts)
+              y_scaler = joblib.load(f"{OUTPUT_DIR}/y_scaler.pkl")
+              preds_orig = y_scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
+              acts_orig = y_scaler.inverse_transform(acts.reshape(-1, 1)).flatten()
+              mask = np.abs(acts_orig) > 1000
+              mape = np.mean(np.abs((acts_orig[mask] - preds_orig[mask]) / acts_orig[mask])) * 100 if mask.sum() > 0 else np.nan
+              logger.info(f"Epoch {ep+1}/{NUM_EPOCHS} | Train: {tloss:.4f} | Val: {vloss:.4f} | MAPE: {mape:.1f}%")
+              if vloss < best:
+                  best = vloss
+                  torch.save(model.module.state_dict(), f"{OUTPUT_DIR}/best_model.pt")
+                  logger.info("Saved best model")
+          dist.barrier()
+      
+      # Cleanup
+      if rank == 0:
+          for f in [".X_train.npy", ".y_train.npy", ".X_val.npy", ".y_val.npy"]:
+              try: os.remove(f"{OUTPUT_DIR}/{f}")
+              except: pass
+          logger.info(f"Training complete! Best val_loss: {best:.4f}")
+      
+      dist.destroy_process_group()
+      TRAIN_SCRIPT
+      
+      torchrun --nnodes=$PET_NNODES --nproc_per_node=$PET_NPROC_PER_NODE --node_rank=$PET_NODE_RANK \
+        --rdzv_backend=c10d --rdzv_endpoint=$PET_MASTER_ADDR:$PET_MASTER_PORT /tmp/train.py

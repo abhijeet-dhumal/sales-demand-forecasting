@@ -1,39 +1,74 @@
-# Feast Feature Store Configuration - Simple Local Setup
-# SQLite for registry, online store, and file-based offline store
+# Feast Feature Store Configuration - Production Setup
+# PostgreSQL for durable storage + Ray for distributed compute
 
 project: sales_demand_forecasting
 
-# SQLite registry (local file-based)
-registry: /shared/feature_repo/data/feast_registry.db
+# PostgreSQL registry for feature definitions and metadata
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://feast:feast_password@feast-postgres.kft-feast-quickstart.svc.cluster.local:5432/feast_registry
+  cache_ttl_seconds: 60
+  sqlalchemy_config_kwargs:
+    pool_pre_ping: true
+    pool_size: 10
+    max_overflow: 20
 
 provider: local
 
-# SQLite online store for real-time inference
-online_store:
-  type: sqlite
-  path: /shared/feature_repo/data/online_store.db
-
-# File-based offline store (simple, no Ray)
+# PostgreSQL offline store for data I/O and persistence
 offline_store:
-  type: file
+  type: postgres
+  host: feast-postgres.kft-feast-quickstart.svc.cluster.local
+  port: 5432
+  database: feast_offline
+  db_schema: public
+  user: feast
+  password: feast_password
+  sslmode: prefer
+
+# Ray compute engine for distributed feature processing
+batch_engine:
+  type: ray.engine
+  
+  # Resource configuration (matching training setup)
+  max_workers: 8                         # Match training worker CPU allocation
+  max_parallelism_multiplier: 2          # 2 workers × 2 = 4 parallel tasks
+  
+  # Performance optimization
+  enable_optimization: true
+  broadcast_join_threshold_mb: 100       # Broadcast if features < 100MB
+  target_partition_size_mb: 64           # 64MB chunks for efficient processing
+  
+  # Distributed join configuration
+  window_size_for_joins: "1H"            # 1-hour windows for point-in-time joins
+  enable_distributed_joins: true
+  enable_ray_logging: true               # Show Ray progress bars
+  
+  # Ray configuration (local mode by default)
+  # For production: Connect to dedicated Ray cluster
+  # ray_address: "ray://feast-ray-cluster.kft-feast-quickstart.svc.cluster.local:10001"
+  
+  # Optional: KubeRay configuration for auto-scaling
+  # use_kuberay: true
+  # kuberay_conf:
+  #   cluster_name: "feast-ray-cluster"
+  #   namespace: "kft-feast-quickstart"
+
+# PostgreSQL online store for low-latency serving
+online_store:
+  type: postgres
+  host: feast-postgres.kft-feast-quickstart.svc.cluster.local
+  port: 5432
+  database: feast_online
+  db_schema: public
+  user: feast
+  password: feast_password
+  sslmode: prefer
 
 entity_key_serialization_version: 3
 
-
-# For production deployments with high concurrency requirements, you can use:
-# - PostgreSQL for the registry (instead of SQLite)
-# - Ray for distributed offline store (instead of file-based)
-#
-# However, for most use cases, the simple SQLite + file-based setup above is sufficient.
-# The training script uses direct parquet loading which bypasses Feast for speed.
-#
-# # PostgreSQL registry example:
-# # registry:
-# #   registry_type: sql
-# #   path: postgresql+psycopg2://feast:<password>@feast-postgres.<your-namespace>.svc.cluster.local:5432/feast_registry
-# #   cache_ttl_seconds: 60
-#
-# # Ray offline store example:
-# # offline_store:
-# #   type: ray
-# #   storage_path: /shared/models/feast_ray_storage
+# ARCHITECTURE:
+# - PostgreSQL Registry: Feature definitions (SQL-queryable, transactional)
+# - PostgreSQL Offline: Raw feature storage (durable, ACID compliant)
+# - Ray Compute Engine: Distributed transformations & joins (parallel, scalable)
+# - PostgreSQL Online: Real-time serving (low-latency access)
