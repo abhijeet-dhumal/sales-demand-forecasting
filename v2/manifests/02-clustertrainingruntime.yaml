@@ -26,7 +26,7 @@ spec:
                 volumes:
                 - name: shared-storage
                   persistentVolumeClaim:
-                    claimName: shared-storage
+                    claimName: feast-pvc
                 containers:
                 - name: node
                   image: registry.redhat.io/rhoai/odh-training-cuda128-torch28-py312-rhel9@sha256:bdc8cb781f005c11534a959fd57b8ba5133522e3bb4756d409e3111eeaf2e8ee

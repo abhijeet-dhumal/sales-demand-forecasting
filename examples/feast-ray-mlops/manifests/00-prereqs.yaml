@@ -1,0 +1,71 @@
+# Prerequisites: Namespace, Storage, RBAC
+# Apply first: kubectl apply -f 00-prereqs.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feast-mlops-demo
+  labels:
+    opendatahub.io/dashboard: "true"
+
+---
+# Shared storage for data, features, models (RWX for Ray workers)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-storage
+  namespace: feast-mlops-demo
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs-csi  # Adjust for your cluster
+
+---
+# Service Account for workloads
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-sa
+  namespace: feast-mlops-demo
+
+---
+# RBAC for Ray and Kubeflow access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mlops-role
+  namespace: feast-mlops-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mlops-rolebinding
+  namespace: feast-mlops-demo
+subjects:
+  - kind: ServiceAccount
+    name: mlops-sa
+    namespace: feast-mlops-demo
+  - kind: ServiceAccount
+    name: default
+    namespace: feast-mlops-demo
+roleRef:
+  kind: Role
+  name: mlops-role
+  apiGroup: rbac.authorization.k8s.io

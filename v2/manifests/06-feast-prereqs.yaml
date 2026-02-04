@@ -39,7 +39,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
 ---
-# RoleBinding
+# RoleBinding for feast-sa
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -48,6 +48,23 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: feast-sa
+    namespace: feast-trainer-demo
+roleRef:
+  kind: Role
+  name: feast-rayjob-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# RoleBinding for TrainJob (default SA) to access Ray resources
+# Required when training job needs to connect to KubeRay cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trainjob-ray-access
+  namespace: feast-trainer-demo
+subjects:
+  - kind: ServiceAccount
+    name: default
     namespace: feast-trainer-demo
 roleRef:
   kind: Role

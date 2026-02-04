@@ -1,0 +1,292 @@
+# Kubeflow TrainJob Template
+# This manifest shows how to submit training with Feast feature retrieval
+# Apply: kubectl apply -f 04-trainjob.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: training-script
+  namespace: feast-mlops-demo
+data:
+  train.py: |
+    """
+    Distributed PyTorch Training with Feast Features + MLflow Tracking
+    
+    This script:
+    1. Fetches features from Feast feature store
+    2. Trains a sales forecasting model with DDP
+    3. Logs metrics/artifacts to MLflow
+    """
+    import os
+    import logging
+    import numpy as np
+    import pandas as pd
+    import torch
+    import torch.nn as nn
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
+    from sklearn.preprocessing import StandardScaler
+    import mlflow
+    import mlflow.pytorch
+    import joblib
+    from datetime import datetime
+    
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+    logger = logging.getLogger(__name__)
+    
+    # Configuration
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", "sales-forecasting")
+    EPOCHS = int(os.getenv("EPOCHS", "50"))
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "256"))
+    LEARNING_RATE = float(os.getenv("LEARNING_RATE", "0.001"))
+    DATA_PATH = os.getenv("DATA_PATH", "/shared/data/training_data.parquet")
+    MODEL_PATH = os.getenv("MODEL_PATH", "/shared/models")
+    
+    class SalesForecastModel(nn.Module):
+        """MLP for sales forecasting"""
+        def __init__(self, input_dim, hidden_dim=128):
+            super().__init__()
+            self.model = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.BatchNorm1d(hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 4, 1)
+            )
+        
+        def forward(self, x):
+            return self.model(x).squeeze(-1)
+    
+    def setup_distributed():
+        """Initialize distributed training"""
+        if "WORLD_SIZE" in os.environ:
+            backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+            dist.init_process_group(backend=backend)
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            return rank, world_size, local_rank
+        return 0, 1, 0
+    
+    def load_data(path):
+        """Load training data from parquet file"""
+        logger.info(f"Loading data from {path}...")
+        df = pd.read_parquet(path)
+        
+        # Identify feature and target columns
+        target_col = "weekly_sales"
+        exclude_cols = [target_col, "event_timestamp", "store_id", "dept_id"]
+        feature_cols = [c for c in df.columns if c not in exclude_cols 
+                       and df[c].dtype in [np.float64, np.float32, np.int64, np.int32]]
+        
+        X = df[feature_cols].fillna(0).values
+        y = df[target_col].values
+        
+        return X, y, feature_cols
+    
+    def train():
+        """Main training function"""
+        logger.info("=" * 60)
+        logger.info("SALES FORECASTING MODEL TRAINING")
+        logger.info("=" * 60)
+        
+        # Setup distributed
+        rank, world_size, local_rank = setup_distributed()
+        device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Rank {rank}/{world_size}, Device: {device}")
+        
+        # Load and preprocess data
+        X, y, feature_cols = load_data(DATA_PATH)
+        
+        # Scale features
+        scaler_X = StandardScaler()
+        scaler_y = StandardScaler()
+        X = scaler_X.fit_transform(X)
+        y = scaler_y.fit_transform(y.reshape(-1, 1)).flatten()
+        
+        logger.info(f"Data shape: X={X.shape}, y={len(y)}")
+        
+        # Create DataLoader with DistributedSampler
+        dataset = TensorDataset(torch.FloatTensor(X), torch.FloatTensor(y))
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
+        dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler, 
+                               shuffle=(sampler is None), num_workers=2)
+        
+        # Initialize model
+        model = SalesForecastModel(input_dim=X.shape[1]).to(device)
+        if world_size > 1:
+            model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
+        
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+        
+        # MLflow tracking (rank 0 only)
+        if rank == 0:
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            mlflow.set_experiment(EXPERIMENT_NAME)
+            mlflow.start_run(run_name=f"trainjob-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+            mlflow.log_params({
+                "epochs": EPOCHS,
+                "batch_size": BATCH_SIZE,
+                "learning_rate": LEARNING_RATE,
+                "world_size": world_size,
+                "input_dim": X.shape[1],
+                "num_samples": len(dataset),
+                "features": ",".join(feature_cols[:10]) + "..."  # Log first 10 features
+            })
+        
+        # Training loop
+        best_loss = float("inf")
+        for epoch in range(EPOCHS):
+            if sampler:
+                sampler.set_epoch(epoch)
+            
+            model.train()
+            total_loss = 0
+            for batch_X, batch_y in dataloader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                total_loss += loss.item()
+            
+            scheduler.step()
+            avg_loss = total_loss / len(dataloader)
+            
+            # Log metrics (rank 0 only)
+            if rank == 0:
+                rmse = (avg_loss ** 0.5)
+                mlflow.log_metrics({
+                    "train_loss": avg_loss,
+                    "train_rmse": rmse,
+                    "lr": scheduler.get_last_lr()[0]
+                }, step=epoch)
+                
+                if (epoch + 1) % 10 == 0:
+                    logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Loss: {avg_loss:.4f} RMSE: {rmse:.4f}")
+                
+                # Save best model
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    model_to_save = model.module if hasattr(model, "module") else model
+                    os.makedirs(MODEL_PATH, exist_ok=True)
+                    torch.save(model_to_save.state_dict(), f"{MODEL_PATH}/best_model.pt")
+            
+            if world_size > 1:
+                dist.barrier()
+        
+        # Final save and logging (rank 0 only)
+        if rank == 0:
+            model_to_save = model.module if hasattr(model, "module") else model
+            
+            # Save scalers
+            joblib.dump({"scaler_X": scaler_X, "scaler_y": scaler_y}, f"{MODEL_PATH}/scalers.joblib")
+            joblib.dump(feature_cols, f"{MODEL_PATH}/feature_cols.pkl")
+            
+            # Log to MLflow
+            mlflow.log_metrics({"final_loss": best_loss, "final_rmse": best_loss ** 0.5})
+            mlflow.pytorch.log_model(model_to_save, "model")
+            
+            # Register model
+            model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
+            mlflow.register_model(model_uri, "sales-forecasting-model")
+            
+            mlflow.end_run()
+            
+            logger.info("=" * 60)
+            logger.info(f"Training Complete! Best Loss: {best_loss:.4f}")
+            logger.info(f"Model saved to {MODEL_PATH}")
+            logger.info("=" * 60)
+        
+        # Cleanup
+        if world_size > 1:
+            dist.destroy_process_group()
+    
+    if __name__ == "__main__":
+        train()
+
+---
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-training
+  namespace: feast-mlops-demo
+  labels:
+    app.kubernetes.io/name: sales-training
+spec:
+  runtimeRef:
+    name: torch-distributed-cpu
+    kind: ClusterTrainingRuntime
+  
+  trainer:
+    numNodes: 2
+    
+    resourcesPerNode:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+    
+    image: quay.io/modh/ray:2.52.1-py312-cu128
+    
+    command:
+      - bash
+      - -c
+      - |
+        pip install --quiet torch pandas pyarrow scikit-learn mlflow joblib psycopg2-binary
+        python /scripts/train.py
+    
+    env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow:5000"
+      - name: EXPERIMENT_NAME
+        value: "sales-forecasting"
+      - name: DATA_PATH
+        value: "/shared/data/training_data.parquet"
+      - name: MODEL_PATH
+        value: "/shared/models"
+      - name: EPOCHS
+        value: "50"
+      - name: BATCH_SIZE
+        value: "256"
+      - name: LEARNING_RATE
+        value: "0.001"
+    
+    volumeMounts:
+      - name: scripts
+        mountPath: /scripts
+      - name: shared
+        mountPath: /shared
+
+  podSpecOverrides:
+    - targetJobs:
+        - Trainer
+      containers:
+        - name: trainer
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: shared
+              mountPath: /shared
+      volumes:
+        - name: scripts
+          configMap:
+            name: training-script
+        - name: shared
+          persistentVolumeClaim:
+            claimName: shared-storage

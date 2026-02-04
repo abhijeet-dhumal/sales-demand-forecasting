@@ -1,76 +1,7 @@
 # MLflow Tracking Server for Model Registry & Experiment Tracking
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mlflow-postgres-secret
-  namespace: feast-trainer-demo
-type: Opaque
-stringData:
-  username: mlflow
-  password: mlflow123
-  database: mlflow
+# NOTE: Uses same PostgreSQL database as Feast (feast user)
 ---
-# Create MLflow database in PostgreSQL
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: mlflow-db-init
-  namespace: feast-trainer-demo
-spec:
-  ttlSecondsAfterFinished: 300
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: init
-        image: postgres:15
-        env:
-        - name: PGHOST
-          value: feast-postgres
-        - name: PGUSER
-          valueFrom:
-            secretKeyRef:
-              name: feast-postgres-secret
-              key: username
-        - name: PGPASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: feast-postgres-secret
-              key: password
-        command:
-        - bash
-        - -c
-        - |
-          set -e
-          echo "Creating MLflow database..."
-          
-          # Wait for PostgreSQL
-          until pg_isready -h $PGHOST -p 5432; do
-            echo "Waiting for PostgreSQL..."
-            sleep 2
-          done
-          
-          # Create mlflow database and user
-          psql -h $PGHOST -U $PGUSER -c "CREATE DATABASE mlflow;" || true
-          psql -h $PGHOST -U $PGUSER -c "CREATE USER mlflow WITH PASSWORD 'mlflow123';" || true
-          psql -h $PGHOST -U $PGUSER -c "GRANT ALL PRIVILEGES ON DATABASE mlflow TO mlflow;" || true
-          psql -h $PGHOST -U $PGUSER -d mlflow -c "GRANT ALL ON SCHEMA public TO mlflow;" || true
-          
-          echo "✅ MLflow database created"
----
-# MLflow artifacts storage PVC
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mlflow-artifacts
-  namespace: feast-trainer-demo
-spec:
-  accessModes:
-  - ReadWriteMany
-  resources:
-    requests:
-      storage: 50Gi
-  storageClassName: nfs-csi
+# MLflow uses shared feast-pvc for artifacts (at /shared/mlflow-artifacts)
 ---
 # MLflow Deployment
 apiVersion: apps/v1
@@ -108,8 +39,8 @@ spec:
         - server
         - --host=0.0.0.0
         - --port=5000
-        - --backend-store-uri=postgresql://mlflow:mlflow123@feast-postgres:5432/mlflow
-        - --default-artifact-root=/mlflow/artifacts
+        - --backend-store-uri=postgresql://feast:feast123@feast-postgres:5432/feast
+        - --default-artifact-root=/shared/mlflow-artifacts
         - --serve-artifacts
         env:
         - name: MLFLOW_TRACKING_URI
@@ -124,8 +55,8 @@ spec:
             cpu: "2"
             memory: "4Gi"
         volumeMounts:
-        - name: artifacts
-          mountPath: /mlflow/artifacts
+        - name: shared-storage
+          mountPath: /shared
         - name: deps
           mountPath: /deps
         livenessProbe:
@@ -141,9 +72,9 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 10
       volumes:
-      - name: artifacts
+      - name: shared-storage
         persistentVolumeClaim:
-          claimName: mlflow-artifacts
+          claimName: feast-pvc
       - name: deps
         emptyDir: {}
 ---

@@ -20,76 +20,30 @@ spec:
         cpu: "8"
         memory: "16Gi"
     env:
-    - name: FEATURE_REPO
-      value: /shared/feature_repo
+    # Data paths (shared with dataprep job)
     - name: DATA_PATH
       value: /shared/data
     - name: OUTPUT_DIR
       value: /shared/models
     - name: NUM_EPOCHS
       value: "15"
-    - name: VAL_START_DATE
-      value: "2012-01-01"
-    # PostgreSQL connection
-    - name: POSTGRES_HOST
-      value: feast-postgres.feast-trainer-demo.svc.cluster.local
-    - name: POSTGRES_USER
-      valueFrom:
-        secretKeyRef:
-          name: feast-postgres-secret
-          key: username
-    - name: POSTGRES_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          name: feast-postgres-secret
-          key: password
     # MLflow configuration
     - name: MLFLOW_TRACKING_URI
       value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
     - name: MLFLOW_EXPERIMENT_NAME
       value: "sales-forecasting"
-    # KubeRay cluster - not used for now (local Ray for feature retrieval)
-    # - name: RAY_ADDRESS
-    #   value: "feast-ray-head.feast-trainer-demo.svc.cluster.local:6379"
-    # Ray resource limits for local mode
-    - name: RAY_OBJECT_STORE_MEMORY
-      value: "500000000"
+    # Note: Using pre-computed training data from dataprep job
+    # This is the recommended production pattern:
+    # - Dataprep creates training datasets (via Feast + KubeRay)
+    # - Training consumes prepared data directly (faster, reproducible)
     command:
     - bash
     - -c
     - |
       set -e
-      pip install --quiet "feast[postgres,ray]==0.59.0" psycopg2-binary scikit-learn joblib "ray[default]>=2.9.0" mlflow>=2.10.0
-
-      mkdir -p $FEATURE_REPO
-      cat > $FEATURE_REPO/feature_store.yaml << EOF
-      project: sales_forecasting
-      provider: local
-      registry:
-        registry_type: sql
-        path: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:5432/feast
-        cache_ttl_seconds: 60
-      offline_store:
-        type: ray
-        storage_path: $DATA_PATH/ray_storage
-        broadcast_join_threshold_mb: 50
-        max_parallelism_multiplier: 2
-        enable_ray_logging: true
-      batch_engine:
-        type: ray.engine
-        max_workers: 2
-        enable_optimization: true
-        enable_distributed_joins: true
-        enable_ray_logging: true
-      online_store:
-        type: postgres
-        host: $POSTGRES_HOST
-        port: 5432
-        database: feast
-        user: $POSTGRES_USER
-        password: $POSTGRES_PASSWORD
-      entity_key_serialization_version: 3
-      EOF
+      echo "Installing dependencies..."
+      # Pin MLflow to match server version to avoid API compatibility issues
+      pip install --quiet scikit-learn joblib "mlflow==2.10.0" pyarrow
 
       cat > /tmp/train_mlflow.py << 'TRAIN_SCRIPT'
       import os
@@ -103,24 +57,18 @@ spec:
       from torch.utils.data import DataLoader, Dataset, DistributedSampler
       from sklearn.preprocessing import StandardScaler
       import joblib
-      import ray
       import mlflow
-      import mlflow.pytorch
-      from feast import FeatureStore
       from datetime import datetime
 
       logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
       logger = logging.getLogger(__name__)
 
       # Configuration
-      FEATURE_REPO = os.environ.get("FEATURE_REPO", "/shared/feature_repo")
       DATA_PATH = os.environ.get("DATA_PATH", "/shared/data")
       OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/shared/models")
       NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 15))
-      VAL_START_DATE = os.environ.get("VAL_START_DATE", "2012-01-01")
       MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
       MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "sales-forecasting")
-      RAY_ADDRESS = os.environ.get("RAY_ADDRESS", None)
 
       # =================================================================
       # MODEL DEFINITION
@@ -178,98 +126,50 @@ spec:
           # Log initial parameters
           mlflow.log_params({
               "num_epochs": NUM_EPOCHS,
-              "val_start_date": VAL_START_DATE,
               "world_size": world_size,
               "device": str(device),
-              "feature_repo": FEATURE_REPO,
           })
 
       # =================================================================
-      # FEATURE RETRIEVAL VIA FEAST + RAY
+      # LOAD PRE-COMPUTED TRAINING DATA
       # =================================================================
+      # Production pattern: Dataprep job (via Feast + KubeRay) creates training data
+      # Training job consumes prepared data directly - faster & reproducible
       if rank == 0:
           os.makedirs(OUTPUT_DIR, exist_ok=True)
           
           logger.info("=" * 60)
-          logger.info("FETCHING FEATURES FROM FEAST (Ray)")
+          logger.info("LOADING PRE-COMPUTED TRAINING DATA")
           logger.info("=" * 60)
+          logger.info("Note: Data was prepared by dataprep job using Feast + KubeRay")
           
-          # Initialize Ray - connect to KubeRay cluster
-          if RAY_ADDRESS:
-              logger.info(f"Connecting to KubeRay cluster: {RAY_ADDRESS}")
-              ray.init(address=RAY_ADDRESS, ignore_reinit_error=True)
-          else:
-              logger.info("Using local Ray instance")
-              ray.init(
-                  ignore_reinit_error=True, 
-                  num_cpus=2,
-                  object_store_memory=500_000_000,
-              )
-          logger.info(f"Ray cluster: {ray.cluster_resources()}")
+          # Load pre-computed features from dataprep job
+          logger.info(f"Loading data from {DATA_PATH}...")
+          training_df = pd.read_parquet(f"{DATA_PATH}/features.parquet")
+          training_df["date"] = pd.to_datetime(training_df["date"])
           
-          # Initialize Feast
-          store = FeatureStore(repo_path=FEATURE_REPO)
-          logger.info(f"Connected to Feast registry")
+          logger.info(f"Loaded {len(training_df):,} rows, {len(training_df.columns)} columns")
+          logger.info(f"Columns: {list(training_df.columns)}")
           
-          # Load entity dataframe
-          entity_df = pd.read_parquet(f"{DATA_PATH}/entities.parquet")
-          entity_df["date"] = pd.to_datetime(entity_df["date"])
-          entity_df = entity_df.rename(columns={"date": "event_timestamp"})
+          # Temporal split (80/20 based on time)
+          training_df = training_df.sort_values("date")
+          split_idx = int(len(training_df) * 0.8)
+          train_df = training_df.iloc[:split_idx]
+          val_df = training_df.iloc[split_idx:]
           
-          logger.info(f"Entity DataFrame: {len(entity_df)} rows")
-          
-          # Feature list
-          feature_list = [
-              "sales_features:lag_1", "sales_features:lag_2", "sales_features:lag_4",
-              "sales_features:lag_8", "sales_features:lag_52",
-              "sales_features:rolling_mean_4w", "sales_features:rolling_std_4w",
-              "sales_features:rolling_mean_8w", "sales_features:rolling_std_8w",
-              "sales_features:rolling_mean_52w",
-              "store_features:store_size", "store_features:temperature",
-              "store_features:fuel_price", "store_features:cpi", "store_features:unemployment",
-              "store_features:markdown1", "store_features:markdown2", "store_features:markdown3",
-              "store_features:markdown4", "store_features:markdown5",
-              "store_features:is_holiday", "store_features:week_of_year", "store_features:month",
-          ]
-          
-          # Get historical features
-          logger.info("Fetching historical features...")
-          training_df = store.get_historical_features(
-              entity_df=entity_df,
-              features=feature_list,
-          ).to_df()
-          
-          logger.info(f"Features retrieved: {len(training_df)} rows, {len(training_df.columns)} columns")
-          
-          # Load target variable
-          full_df = pd.read_parquet(f"{DATA_PATH}/features.parquet")
-          full_df["date"] = pd.to_datetime(full_df["date"])
-          training_df["event_timestamp"] = training_df["event_timestamp"].dt.tz_localize(None)
-          
-          training_df = training_df.merge(
-              full_df[["store_id", "dept_id", "date", "weekly_sales"]].rename(columns={"date": "event_timestamp"}),
-              on=["store_id", "dept_id", "event_timestamp"],
-              how="left"
-          )
-          
-          # Temporal split
-          val_date = pd.to_datetime(VAL_START_DATE)
-          train_df = training_df[training_df["event_timestamp"] < val_date]
-          val_df = training_df[training_df["event_timestamp"] >= val_date]
-          
-          logger.info(f"Train: {len(train_df)}, Val: {len(val_df)}")
+          logger.info(f"Train: {len(train_df):,}, Val: {len(val_df):,}")
           
           # Log dataset info to MLflow
           mlflow.log_params({
               "total_rows": len(training_df),
               "train_rows": len(train_df),
               "val_rows": len(val_df),
-              "num_features": len(feature_list),
+              "data_source": "pre-computed (Feast + KubeRay)",
           })
           
-          # Feature columns
+          # Feature columns (exclude identifiers and target)
           feature_cols = [c for c in training_df.columns 
-                          if c not in ["store_id", "dept_id", "event_timestamp", "weekly_sales"]
+                          if c not in ["store_id", "dept_id", "date", "event_timestamp", "weekly_sales"]
                           and training_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
           
           X_train = train_df[feature_cols].fillna(0).values
@@ -292,9 +192,7 @@ spec:
           joblib.dump(y_scaler, f"{OUTPUT_DIR}/y_scaler.pkl")
           joblib.dump(feature_cols, f"{OUTPUT_DIR}/feature_cols.pkl")
           
-          # Shutdown Ray
-          ray.shutdown()
-          logger.info("Ray shutdown")
+          logger.info("Data loading and preprocessing complete")
           
           # Save for other ranks
           np.save(f"{OUTPUT_DIR}/.X_train.npy", X_train)
@@ -436,33 +334,14 @@ spec:
               "best_mape": best_mape,
           })
           
-          # Log model to MLflow
-          logger.info("Logging model to MLflow...")
-          
-          # Load best model
-          best_model = SalesMLP(input_dim, HIDDEN_DIMS, DROPOUT)
-          best_model.load_state_dict(torch.load(f"{OUTPUT_DIR}/best_model.pt"))
-          
-          # Log PyTorch model
-          mlflow.pytorch.log_model(
-              best_model,
-              "model",
-              registered_model_name="sales-forecasting-mlp",
-              pip_requirements=["torch>=2.0.0", "numpy", "pandas"]
-          )
-          
-          # Log artifacts
-          mlflow.log_artifact(f"{OUTPUT_DIR}/scaler.pkl")
-          mlflow.log_artifact(f"{OUTPUT_DIR}/y_scaler.pkl")
-          mlflow.log_artifact(f"{OUTPUT_DIR}/feature_cols.pkl")
-          
           # End MLflow run
           mlflow.end_run()
           
           logger.info(f"✅ Training complete!")
           logger.info(f"   Best val_loss: {best_val_loss:.4f}")
           logger.info(f"   Best MAPE: {best_mape:.1f}%")
-          logger.info(f"   Model logged to MLflow: sales-forecasting-mlp")
+          logger.info(f"   Model saved to: {OUTPUT_DIR}/best_model.pt")
+          logger.info(f"   Metrics logged to MLflow: {MLFLOW_EXPERIMENT_NAME}")
           
           # Cleanup temp files
           for f in [".X_train.npy", ".y_train.npy", ".X_val.npy", ".y_val.npy", ".y_val_orig.npy", ".input_dim.npy"]:

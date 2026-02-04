@@ -1,0 +1,176 @@
+# Benchmark: Training WITHOUT Feast/Ray (baseline comparison)
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: benchmark-no-feast
+  namespace: feast-trainer-demo
+spec:
+  suspend: false
+  runtimeRef:
+    name: torch-with-storage
+  trainer:
+    numNodes: 1
+    resourcesPerNode:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+      limits:
+        cpu: "8"
+        memory: "16Gi"
+    env:
+    - name: NUM_EPOCHS
+      value: "15"
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      echo "BENCHMARK: Training WITHOUT Feast/Ray"
+      echo "======================================="
+      
+      pip install --quiet scikit-learn joblib pyarrow
+      
+      cat > /tmp/benchmark.py << 'SCRIPT'
+      import os
+      import time
+      import numpy as np
+      import torch
+      import torch.nn as nn
+      import torch.distributed as dist
+      from torch.nn.parallel import DistributedDataParallel as DDP
+      from torch.utils.data import DataLoader, Dataset, DistributedSampler
+      from sklearn.preprocessing import StandardScaler
+      
+      NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 15))
+      
+      class SalesMLP(nn.Module):
+          def __init__(self, input_dim):
+              super().__init__()
+              self.net = nn.Sequential(
+                  nn.Linear(input_dim, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(256, 128), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(128, 64), nn.BatchNorm1d(64), nn.ReLU(), nn.Dropout(0.2),
+                  nn.Linear(64, 1)
+              )
+          def forward(self, x): return self.net(x).squeeze(-1)
+      
+      class DS(Dataset):
+          def __init__(self, X, y):
+              self.X = torch.tensor(X, dtype=torch.float32)
+              self.y = torch.tensor(y, dtype=torch.float32)
+          def __len__(self): return len(self.X)
+          def __getitem__(self, i): return self.X[i], self.y[i]
+      
+      backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+      dist.init_process_group(backend=backend)
+      rank, world = dist.get_rank(), dist.get_world_size()
+      local_rank = int(os.environ.get("LOCAL_RANK", 0))
+      device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+      
+      if rank == 0:
+          print(f"DDP: rank={rank}/{world}, device={device}")
+          
+          print("=" * 60)
+          print("GENERATING DATA INLINE (no Feast)")
+          print("=" * 60)
+          data_start = time.time()
+          
+          np.random.seed(42)
+          n_rows = 93600
+          n_features = 10
+          
+          X = np.random.randn(n_rows, n_features).astype(np.float32)
+          y = np.random.randn(n_rows).astype(np.float32) * 10000 + 20000
+          
+          split = int(n_rows * 0.8)
+          X_train, X_val = X[:split], X[split:]
+          y_train, y_val = y[:split], y[split:]
+          
+          scaler = StandardScaler()
+          X_train = scaler.fit_transform(X_train)
+          X_val = scaler.transform(X_val)
+          
+          y_scaler = StandardScaler()
+          y_train = y_scaler.fit_transform(y_train.reshape(-1,1)).flatten()
+          y_val = y_scaler.transform(y_val.reshape(-1,1)).flatten()
+          
+          data_time = time.time() - data_start
+          print(f"Data generation time: {data_time:.2f}s")
+          print(f"Train: {len(X_train)}, Val: {len(X_val)}")
+          
+          np.save("/tmp/X_train.npy", X_train)
+          np.save("/tmp/y_train.npy", y_train)
+          np.save("/tmp/X_val.npy", X_val)
+          np.save("/tmp/y_val.npy", y_val)
+      
+      dist.barrier()
+      
+      X_train = np.load("/tmp/X_train.npy")
+      y_train = np.load("/tmp/y_train.npy")
+      X_val = np.load("/tmp/X_val.npy")
+      y_val = np.load("/tmp/y_val.npy")
+      
+      dist.barrier()
+      
+      if rank == 0:
+          print("=" * 60)
+          print("TRAINING MODEL")
+          print("=" * 60)
+          train_start = time.time()
+      
+      train_ds, val_ds = DS(X_train, y_train), DS(X_val, y_val)
+      sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank)
+      train_ld = DataLoader(train_ds, batch_size=256, sampler=sampler, num_workers=2)
+      val_ld = DataLoader(val_ds, batch_size=256, shuffle=False, num_workers=2)
+      
+      model = DDP(SalesMLP(X_train.shape[1]).to(device), device_ids=[local_rank] if torch.cuda.is_available() else None)
+      opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+      sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3)
+      criterion = nn.MSELoss()
+      best = float("inf")
+      
+      for ep in range(NUM_EPOCHS):
+          sampler.set_epoch(ep)
+          model.train()
+          tloss = 0
+          for X, y in train_ld:
+              X, y = X.to(device), y.to(device)
+              opt.zero_grad()
+              loss = criterion(model(X), y)
+              loss.backward()
+              opt.step()
+              tloss += loss.item()
+          tloss /= len(train_ld)
+          
+          model.eval()
+          vloss = 0
+          with torch.no_grad():
+              for X, y in val_ld:
+                  vloss += criterion(model(X.to(device)), y.to(device)).item()
+          vloss /= len(val_ld)
+          sched.step(vloss)
+          
+          if rank == 0:
+              print(f"Epoch {ep+1}/{NUM_EPOCHS} | Train: {tloss:.4f} | Val: {vloss:.4f}")
+              if vloss < best:
+                  best = vloss
+          
+          dist.barrier()
+      
+      if rank == 0:
+          train_time = time.time() - train_start
+          total_time = data_time + train_time
+          print("=" * 60)
+          print("BENCHMARK RESULTS (No Feast/Ray)")
+          print("=" * 60)
+          print(f"Data generation:  {data_time:.2f}s")
+          print(f"Training (15 ep): {train_time:.2f}s")
+          print(f"TOTAL TIME:       {total_time:.2f}s")
+          print(f"Best val_loss:    {best:.4f}")
+      
+      dist.destroy_process_group()
+      SCRIPT
+      
+      torchrun --nnodes=$PET_NNODES --nproc_per_node=$PET_NPROC_PER_NODE --node_rank=$PET_NODE_RANK \
+        --rdzv_backend=c10d --rdzv_endpoint=$PET_MASTER_ADDR:$PET_MASTER_PORT /tmp/benchmark.py
+

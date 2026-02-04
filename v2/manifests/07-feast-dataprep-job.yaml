@@ -213,7 +213,24 @@ data:
     # Save to parquet
     sales_df.to_parquet(DATA_DIR / "sales_features.parquet", index=False)
     store_df.to_parquet(DATA_DIR / "store_features.parquet", index=False)
+    
+    # Create entities.parquet and features.parquet for training job
+    entities_df = sales_df[["store_id", "dept_id", "event_timestamp"]].copy()
+    entities_df = entities_df.rename(columns={"event_timestamp": "date"})
+    entities_df.to_parquet(DATA_DIR / "entities.parquet", index=False)
+    
+    # Merge sales and store data for full features
+    features_df = sales_df.merge(
+        store_df[["store_id", "dept_id", "event_timestamp", "store_size", "temperature", "fuel_price", "cpi", "unemployment"]],
+        on=["store_id", "dept_id", "event_timestamp"],
+        how="left"
+    )
+    features_df = features_df.rename(columns={"event_timestamp": "date"})
+    features_df.to_parquet(DATA_DIR / "features.parquet", index=False)
+    
     print(f"   Saved to: {DATA_DIR}")
+    print(f"   - sales_features.parquet, store_features.parquet (Feast)")
+    print(f"   - entities.parquet, features.parquet (Training)")
     
     # =========================================================================
     # STEP 2: Create Feast Configuration with Ray + KubeRay
