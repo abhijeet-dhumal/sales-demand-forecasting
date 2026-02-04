@@ -150,7 +150,7 @@ if __name__ == "__main__":
     job = client.train(
         trainer=CustomTrainer(
             func=train_sales_model,
-            num_nodes=1,
+            num_nodes=2,
             resources_per_node={"cpu": 4, "memory": "16Gi", "nvidia.com/gpu": 1},
             packages_to_install=["scikit-learn", "pandas", "pyarrow", "joblib", "mlflow"],
             env={"MLFLOW_TRACKING_URI": MLFLOW_URI, "DATA_DIR": "/mnt/shared/data", 
