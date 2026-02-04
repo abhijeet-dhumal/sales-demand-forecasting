@@ -51,18 +51,31 @@ spec:
     - -c
     - |
       set -e
-      pip install --quiet "feast[postgres]==0.40.0" psycopg2-binary scikit-learn joblib
+      pip install --quiet "feast[postgres,ray]==0.59.0" psycopg2-binary scikit-learn joblib "ray[default]>=2.9.0"
       
       # Create feature store config pointing to PostgreSQL
       mkdir -p $FEATURE_REPO
       cat > $FEATURE_REPO/feature_store.yaml << EOF
+      # Feast with Ray Compute Engine
       project: sales_forecasting
       provider: local
       registry:
         registry_type: sql
         path: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:5432/feast
+        cache_ttl_seconds: 60
       offline_store:
-        type: file
+        type: ray
+        storage_path: $DATA_PATH/ray_storage
+        broadcast_join_threshold_mb: 25
+        max_parallelism_multiplier: 1
+        target_partition_size_mb: 16
+        enable_ray_logging: true
+      batch_engine:
+        type: ray.engine
+        max_workers: 2
+        enable_optimization: true
+        enable_distributed_joins: true
+        enable_ray_logging: true
       online_store:
         type: postgres
         host: $POSTGRES_HOST
@@ -70,7 +83,7 @@ spec:
         database: feast
         user: $POSTGRES_USER
         password: $POSTGRES_PASSWORD
-      entity_key_serialization_version: 2
+      entity_key_serialization_version: 3
       EOF
       
       cat > /tmp/train.py << 'TRAIN_SCRIPT'
@@ -85,6 +98,7 @@ spec:
       from torch.utils.data import DataLoader, Dataset, DistributedSampler
       from sklearn.preprocessing import StandardScaler
       import joblib
+      import ray
       from feast import FeatureStore
       
       logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -135,8 +149,17 @@ spec:
           os.makedirs(OUTPUT_DIR, exist_ok=True)
           
           logger.info("=" * 60)
-          logger.info("FETCHING FEATURES FROM FEAST")
+          logger.info("FETCHING FEATURES FROM FEAST (Ray-parallelized)")
           logger.info("=" * 60)
+          
+          # Initialize Ray for distributed feature processing (resource-limited)
+          ray.init(
+              ignore_reinit_error=True, 
+              num_cpus=2,
+              object_store_memory=500_000_000,
+              _system_config={"automatic_object_spilling_enabled": False}
+          )
+          logger.info(f"Ray cluster: {ray.cluster_resources()}")
           
           # Initialize Feast store
           store = FeatureStore(repo_path=FEATURE_REPO)
@@ -230,6 +253,10 @@ spec:
           joblib.dump(scaler, f"{OUTPUT_DIR}/scaler.pkl")
           joblib.dump(y_scaler, f"{OUTPUT_DIR}/y_scaler.pkl")
           joblib.dump(feature_cols, f"{OUTPUT_DIR}/feature_cols.pkl")
+          
+          # Shutdown Ray after feature retrieval
+          ray.shutdown()
+          logger.info("Ray shutdown after feature retrieval")
           
           # Save for other ranks
           np.save(f"{OUTPUT_DIR}/.X_train.npy", X_train)

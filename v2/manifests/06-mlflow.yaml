@@ -1,0 +1,182 @@
+# MLflow Tracking Server for Model Registry & Experiment Tracking
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-postgres-secret
+  namespace: feast-trainer-demo
+type: Opaque
+stringData:
+  username: mlflow
+  password: mlflow123
+  database: mlflow
+---
+# Create MLflow database in PostgreSQL
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlflow-db-init
+  namespace: feast-trainer-demo
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init
+        image: postgres:15
+        env:
+        - name: PGHOST
+          value: feast-postgres
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: feast-postgres-secret
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: feast-postgres-secret
+              key: password
+        command:
+        - bash
+        - -c
+        - |
+          set -e
+          echo "Creating MLflow database..."
+          
+          # Wait for PostgreSQL
+          until pg_isready -h $PGHOST -p 5432; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+          
+          # Create mlflow database and user
+          psql -h $PGHOST -U $PGUSER -c "CREATE DATABASE mlflow;" || true
+          psql -h $PGHOST -U $PGUSER -c "CREATE USER mlflow WITH PASSWORD 'mlflow123';" || true
+          psql -h $PGHOST -U $PGUSER -c "GRANT ALL PRIVILEGES ON DATABASE mlflow TO mlflow;" || true
+          psql -h $PGHOST -U $PGUSER -d mlflow -c "GRANT ALL ON SCHEMA public TO mlflow;" || true
+          
+          echo "✅ MLflow database created"
+---
+# MLflow artifacts storage PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-artifacts
+  namespace: feast-trainer-demo
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs-csi
+---
+# MLflow Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: feast-trainer-demo
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      initContainers:
+      - name: install-deps
+        image: ghcr.io/mlflow/mlflow:v2.10.0
+        command: ["pip", "install", "--target=/deps", "psycopg2-binary"]
+        volumeMounts:
+        - name: deps
+          mountPath: /deps
+      containers:
+      - name: mlflow
+        image: ghcr.io/mlflow/mlflow:v2.10.0
+        ports:
+        - containerPort: 5000
+          name: http
+        command:
+        - mlflow
+        - server
+        - --host=0.0.0.0
+        - --port=5000
+        - --backend-store-uri=postgresql://mlflow:mlflow123@feast-postgres:5432/mlflow
+        - --default-artifact-root=/mlflow/artifacts
+        - --serve-artifacts
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://localhost:5000"
+        - name: PYTHONPATH
+          value: "/deps"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        volumeMounts:
+        - name: artifacts
+          mountPath: /mlflow/artifacts
+        - name: deps
+          mountPath: /deps
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: artifacts
+        persistentVolumeClaim:
+          claimName: mlflow-artifacts
+      - name: deps
+        emptyDir: {}
+---
+# MLflow Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: feast-trainer-demo
+  labels:
+    app: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+  - name: http
+    port: 5000
+    targetPort: 5000
+  type: ClusterIP
+---
+# Route for MLflow UI (OpenShift)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mlflow
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: mlflow
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+

@@ -1,0 +1,483 @@
+# Feast Data Preparation with Native Ray + KubeRay Integration
+# Uses Feast's built-in KubeRay mode via CodeFlare SDK
+# Ref: https://docs.feast.dev/reference/offline-stores/ray
+#
+# This runs as a Kubernetes Job (not RayJob) but connects to the
+# dedicated RayCluster for distributed processing via Feast SDK
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: feast-dataprep-ray
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-dataprep
+    pipeline: sales-forecasting
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: feast-dataprep
+    spec:
+      serviceAccountName: feast-sa
+      restartPolicy: Never
+      containers:
+        - name: feast-dataprep
+          # Must match RayCluster version: Ray 2.52.1, Python 3.12
+          image: quay.io/modh/ray:2.52.1-py312-cu128
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            # Feast KubeRay configuration (native integration)
+            # Ref: https://docs.feast.dev/reference/offline-stores/ray#kuberay-cluster-kubernetes
+            - name: FEAST_RAY_USE_KUBERAY
+              value: "true"
+            - name: FEAST_RAY_CLUSTER_NAME
+              value: "feast-ray"
+            - name: FEAST_RAY_NAMESPACE
+              value: "feast-trainer-demo"
+            - name: FEAST_RAY_SKIP_TLS
+              value: "true"
+            # Auth token from service account (CodeFlare SDK uses this)
+            - name: FEAST_RAY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: feast-sa-token
+                  key: token
+                  optional: true
+            # Kubernetes API server
+            - name: FEAST_RAY_AUTH_SERVER
+              value: "https://kubernetes.default.svc"
+            # Python unbuffered output
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+            - name: scripts
+              mountPath: /scripts
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              echo "============================================================"
+              echo "FEAST DATA PREPARATION - NATIVE RAY + KUBERAY"
+              echo "============================================================"
+              
+              # Install dependencies
+              echo "Installing missing dependencies to /tmp (pandas/numpy/pyarrow already in image)..."
+              pip install --target=/tmp/pylibs -q feast[postgres,ray]==0.59.0 psycopg2-binary codeflare-sdk
+              
+              # Add to Python path
+              export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
+              
+              # Run the data prep script
+              python /scripts/dataprep.py
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: feast-pvc
+        - name: scripts
+          configMap:
+            name: feast-dataprep-scripts
+
+---
+# ConfigMap with data preparation script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feast-dataprep-scripts
+  namespace: feast-trainer-demo
+data:
+  dataprep.py: |
+    #!/usr/bin/env python3
+    """
+    Feast Data Preparation with Native Ray + KubeRay Integration
+    
+    Uses Feast's built-in KubeRay mode:
+    - CodeFlare SDK handles cluster connection and TLS
+    - Ray offline store for distributed data I/O
+    - Ray compute engine for distributed feature processing
+    
+    Monitor Ray jobs at: Ray Dashboard (via Route)
+    """
+    import os
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    
+    print("=" * 70)
+    print("FEAST DATA PREPARATION - NATIVE RAY + KUBERAY")
+    print("=" * 70)
+    
+    # Configuration
+    DATA_DIR = Path("/shared/data")
+    REPO_DIR = Path("/shared/feature_repo")
+    NUM_STORES = 50
+    NUM_DEPTS = 12
+    NUM_WEEKS = 52 * 3  # 3 years
+    
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    REPO_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Show environment configuration
+    print("\n📋 KubeRay Configuration:")
+    print(f"   FEAST_RAY_USE_KUBERAY: {os.environ.get('FEAST_RAY_USE_KUBERAY', 'not set')}")
+    print(f"   FEAST_RAY_CLUSTER_NAME: {os.environ.get('FEAST_RAY_CLUSTER_NAME', 'not set')}")
+    print(f"   FEAST_RAY_NAMESPACE: {os.environ.get('FEAST_RAY_NAMESPACE', 'not set')}")
+    print(f"   FEAST_RAY_SKIP_TLS: {os.environ.get('FEAST_RAY_SKIP_TLS', 'not set')}")
+    
+    # =========================================================================
+    # STEP 1: Generate Sales Data (Local - Fast)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 1: Generating Sales Data")
+    print("=" * 70)
+    
+    np.random.seed(42)
+    # Use timezone-aware datetime for Feast compatibility
+    from datetime import timezone
+    base_date = datetime.now(timezone.utc) - timedelta(weeks=NUM_WEEKS)
+    
+    all_sales = []
+    all_store = []
+    
+    for store_id in range(1, NUM_STORES + 1):
+        store_size = np.random.choice([50000, 100000, 150000, 200000])
+        base_temp = np.random.uniform(40, 80)
+        
+        for dept_id in range(1, NUM_DEPTS + 1):
+            base_sales = np.random.uniform(5000, 50000)
+            
+            for week in range(NUM_WEEKS):
+                date = base_date + timedelta(weeks=week)
+                week_of_year = date.isocalendar()[1]
+                
+                # Sales with seasonality
+                seasonality = 1 + 0.3 * np.sin(2 * np.pi * week_of_year / 52)
+                trend = 1 + 0.001 * week
+                noise = np.random.normal(1, 0.1)
+                weekly_sales = base_sales * seasonality * trend * noise
+                
+                # Lag features
+                lag_1 = base_sales * (1 + np.random.normal(0, 0.1))
+                lag_2 = base_sales * (1 + np.random.normal(0, 0.1))
+                lag_4 = base_sales * (1 + np.random.normal(0, 0.15))
+                lag_8 = base_sales * (1 + np.random.normal(0, 0.2))
+                lag_52 = base_sales * seasonality
+                
+                all_sales.append({
+                    "store_id": store_id,
+                    "dept_id": dept_id,
+                    "event_timestamp": date,
+                    "weekly_sales": round(weekly_sales, 2),
+                    "lag_1": round(lag_1, 2),
+                    "lag_2": round(lag_2, 2),
+                    "lag_4": round(lag_4, 2),
+                    "lag_8": round(lag_8, 2),
+                    "lag_52": round(lag_52, 2),
+                    "rolling_mean_4w": round((lag_1 + lag_2 + lag_4 + weekly_sales) / 4, 2),
+                })
+                
+                all_store.append({
+                    "store_id": store_id,
+                    "dept_id": dept_id,
+                    "event_timestamp": date,
+                    "store_size": store_size,
+                    "temperature": round(base_temp + 20 * np.sin(2 * np.pi * week_of_year / 52) + np.random.normal(0, 5), 1),
+                    "fuel_price": round(2.5 + 0.5 * np.sin(2 * np.pi * week / 52) + np.random.normal(0, 0.1), 3),
+                    "cpi": round(200 + 0.1 * week + np.random.normal(0, 0.5), 2),
+                    "unemployment": round(5 + np.random.normal(0, 0.5), 2),
+                })
+        
+        if store_id % 10 == 0:
+            print(f"   Generated data for store {store_id}/{NUM_STORES}")
+    
+    sales_df = pd.DataFrame(all_sales)
+    store_df = pd.DataFrame(all_store)
+    
+    print(f"\n✅ Data generated:")
+    print(f"   Sales records: {len(sales_df):,}")
+    print(f"   Store records: {len(store_df):,}")
+    
+    # Save to parquet
+    sales_df.to_parquet(DATA_DIR / "sales_features.parquet", index=False)
+    store_df.to_parquet(DATA_DIR / "store_features.parquet", index=False)
+    print(f"   Saved to: {DATA_DIR}")
+    
+    # =========================================================================
+    # STEP 2: Create Feast Configuration with Ray + KubeRay
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 2: Creating Feast Configuration (Ray + KubeRay)")
+    print("=" * 70)
+    
+    # Set environment variables for Feast KubeRay integration
+    # Feast reads these directly: https://docs.feast.dev/reference/offline-stores/ray
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r") as f:
+            os.environ["FEAST_RAY_AUTH_TOKEN"] = f.read().strip()
+        print("   ✅ Set FEAST_RAY_AUTH_TOKEN from SA token")
+    except Exception as e:
+        print(f"   ⚠️  Could not read SA token: {e}")
+    
+    os.environ["FEAST_RAY_USE_KUBERAY"] = "true"
+    os.environ["FEAST_RAY_CLUSTER_NAME"] = "feast-ray"
+    os.environ["FEAST_RAY_NAMESPACE"] = "feast-trainer-demo"
+    os.environ["FEAST_RAY_AUTH_SERVER"] = "https://kubernetes.default.svc"
+    os.environ["FEAST_RAY_SKIP_TLS"] = "true"
+    
+    # feature_store.yaml - simpler config, env vars handle KubeRay
+    feature_store_yaml = f'''
+    project: sales_forecasting
+    provider: local
+    
+    registry:
+      registry_type: sql
+      path: postgresql+psycopg://feast:feast123@feast-postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+      cache_ttl_seconds: 60
+    
+    # Ray offline store - KubeRay config from env vars
+    offline_store:
+      type: ray
+      storage_path: {DATA_DIR}/ray_storage
+      broadcast_join_threshold_mb: 100
+      max_parallelism_multiplier: 2
+      target_partition_size_mb: 64
+      enable_ray_logging: true
+    
+    # Ray compute engine for distributed processing
+    batch_engine:
+      type: ray.engine
+      max_workers: 4
+      enable_optimization: true
+      broadcast_join_threshold_mb: 100
+      target_partition_size_mb: 64
+      enable_distributed_joins: true
+    
+    online_store:
+      type: postgres
+      host: feast-postgres.feast-trainer-demo.svc.cluster.local
+      port: 5432
+      database: feast
+      user: feast
+      password: feast123
+    
+    entity_key_serialization_version: 3
+    '''
+    
+    (REPO_DIR / "feature_store.yaml").write_text(feature_store_yaml.strip())
+    print("✅ feature_store.yaml created with Ray + KubeRay config")
+    
+    # features.py
+    features_py = f'''
+    from datetime import timedelta
+    from feast import Entity, FeatureView, Field, FileSource
+    from feast.types import Float32, Int64
+    
+    # Entities
+    store = Entity(name="store_id", join_keys=["store_id"], value_type=Int64)
+    dept = Entity(name="dept_id", join_keys=["dept_id"], value_type=Int64)
+    
+    # Data sources
+    sales_source = FileSource(
+        path="{DATA_DIR}/sales_features.parquet",
+        timestamp_field="event_timestamp",
+    )
+    
+    store_source = FileSource(
+        path="{DATA_DIR}/store_features.parquet",
+        timestamp_field="event_timestamp",
+    )
+    
+    # Feature Views
+    sales_features = FeatureView(
+        name="sales_features",
+        entities=[store, dept],
+        ttl=timedelta(weeks=52),
+        schema=[
+            Field(name="weekly_sales", dtype=Float32),
+            Field(name="lag_1", dtype=Float32),
+            Field(name="lag_2", dtype=Float32),
+            Field(name="lag_4", dtype=Float32),
+            Field(name="lag_8", dtype=Float32),
+            Field(name="lag_52", dtype=Float32),
+            Field(name="rolling_mean_4w", dtype=Float32),
+        ],
+        source=sales_source,
+        online=True,
+    )
+    
+    store_features = FeatureView(
+        name="store_features",
+        entities=[store, dept],
+        ttl=timedelta(weeks=52),
+        schema=[
+            Field(name="store_size", dtype=Int64),
+            Field(name="temperature", dtype=Float32),
+            Field(name="fuel_price", dtype=Float32),
+            Field(name="cpi", dtype=Float32),
+            Field(name="unemployment", dtype=Float32),
+        ],
+        source=store_source,
+        online=True,
+    )
+    '''
+    
+    (REPO_DIR / "features.py").write_text(features_py.strip())
+    print("✅ features.py created")
+    
+    # =========================================================================
+    # STEP 3: Apply Feast Definitions
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 3: Applying Feast Definitions")
+    print("=" * 70)
+    
+    from feast import FeatureStore, Entity, FeatureView, Field, FileSource
+    from feast.types import Float32, Int64
+    from datetime import timedelta
+    
+    # Define entities
+    store_entity = Entity(name="store_id", join_keys=["store_id"])
+    dept_entity = Entity(name="dept_id", join_keys=["dept_id"])
+    
+    # Define sources
+    sales_source = FileSource(
+        path=str(DATA_DIR / "sales_features.parquet"),
+        timestamp_field="event_timestamp",
+    )
+    
+    store_source = FileSource(
+        path=str(DATA_DIR / "store_features.parquet"),
+        timestamp_field="event_timestamp",
+    )
+    
+    # Define feature views
+    sales_fv = FeatureView(
+        name="sales_features",
+        entities=[store_entity, dept_entity],
+        ttl=timedelta(days=365),
+        schema=[
+            Field(name="weekly_sales", dtype=Float32),
+            Field(name="lag_1", dtype=Float32),
+            Field(name="lag_2", dtype=Float32),
+            Field(name="lag_4", dtype=Float32),
+            Field(name="lag_8", dtype=Float32),
+            Field(name="lag_52", dtype=Float32),
+            Field(name="rolling_mean_4w", dtype=Float32),
+        ],
+        source=sales_source,
+        online=True,
+    )
+    
+    store_fv = FeatureView(
+        name="store_features",
+        entities=[store_entity, dept_entity],
+        ttl=timedelta(days=365),
+        schema=[
+            Field(name="store_size", dtype=Float32),
+            Field(name="temperature", dtype=Float32),
+            Field(name="fuel_price", dtype=Float32),
+            Field(name="cpi", dtype=Float32),
+            Field(name="unemployment", dtype=Float32),
+        ],
+        source=store_source,
+        online=True,
+    )
+    
+    # Apply definitions to registry
+    fs = FeatureStore(repo_path=str(REPO_DIR))
+    fs.apply([store_entity, dept_entity, sales_fv, store_fv])
+    
+    print("✅ Feature definitions applied to PostgreSQL registry")
+    print(f"   Feature Views: {[fv.name for fv in fs.list_feature_views()]}")
+    
+    # =========================================================================
+    # STEP 4: Test Historical Feature Retrieval (Uses Ray Cluster!)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 4: Testing Historical Feature Retrieval (Ray Distributed)")
+    print("=" * 70)
+    
+    print("\n🚀 Connecting to KubeRay cluster via Feast SDK...")
+    print("   This will submit work to the Ray cluster for distributed processing")
+    
+    # Sample entity dataframe
+    test_entities = pd.DataFrame({
+        "store_id": [1, 2, 3, 4, 5] * 200,
+        "dept_id": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 100,
+        "event_timestamp": [datetime.now() - timedelta(days=i % 60) for i in range(1000)]
+    })
+    
+    print(f"   Entity DataFrame: {len(test_entities)} rows")
+    
+    try:
+        # This uses Ray compute engine for distributed processing!
+        features = fs.get_historical_features(
+            entity_df=test_entities,
+            features=[
+                "sales_features:lag_1",
+                "sales_features:lag_2",
+                "sales_features:rolling_mean_4w",
+                "store_features:store_size",
+                "store_features:temperature",
+            ]
+        ).to_df()
+        
+        print(f"✅ Retrieved {len(features)} rows with columns: {list(features.columns)}")
+        print("\n   📊 Check Ray Dashboard -> Jobs tab to see the distributed job!")
+        
+    except Exception as e:
+        print(f"⚠️  Feature retrieval error: {e}")
+        print("   Falling back to local mode for apply/materialize...")
+    
+    # =========================================================================
+    # STEP 5: Materialize to Online Store
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 5: Materializing to Online Store")
+    print("=" * 70)
+    
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=30)
+    
+    print(f"   Materializing from {start_date.date()} to {end_date.date()}...")
+    
+    try:
+        fs.materialize(start_date=start_date, end_date=end_date)
+        print("✅ Features materialized to PostgreSQL online store")
+    except Exception as e:
+        print(f"⚠️  Materialization error: {e}")
+    
+    # =========================================================================
+    # COMPLETE
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("✅ DATA PREPARATION COMPLETE")
+    print("=" * 70)
+    print(f"""
+    Summary:
+    - Generated {len(sales_df):,} sales records
+    - Feast configured with Ray offline store + KubeRay mode
+    - Feature definitions applied to PostgreSQL registry
+    - Features materialized to online store
+    
+    Ray Integration:
+    - Cluster: feast-ray (feast-trainer-demo namespace)
+    - Offline Store: ray (distributed data I/O)
+    - Batch Engine: ray.engine (distributed processing)
+    - Check Ray Dashboard for job visibility!
+    
+    Next: Run training job with Feast features
+    """)

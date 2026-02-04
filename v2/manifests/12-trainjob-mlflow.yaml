@@ -1,0 +1,477 @@
+# Training Job with MLflow Integration & KubeRay Support
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-forecasting-mlflow
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: sales-forecasting-mlflow
+spec:
+  suspend: false
+  runtimeRef:
+    name: torch-with-storage
+  trainer:
+    numNodes: 1
+    resourcesPerNode:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+      limits:
+        cpu: "8"
+        memory: "16Gi"
+    env:
+    - name: FEATURE_REPO
+      value: /shared/feature_repo
+    - name: DATA_PATH
+      value: /shared/data
+    - name: OUTPUT_DIR
+      value: /shared/models
+    - name: NUM_EPOCHS
+      value: "15"
+    - name: VAL_START_DATE
+      value: "2012-01-01"
+    # PostgreSQL connection
+    - name: POSTGRES_HOST
+      value: feast-postgres.feast-trainer-demo.svc.cluster.local
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          name: feast-postgres-secret
+          key: username
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: feast-postgres-secret
+          key: password
+    # MLflow configuration
+    - name: MLFLOW_TRACKING_URI
+      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+    - name: MLFLOW_EXPERIMENT_NAME
+      value: "sales-forecasting"
+    # KubeRay cluster - not used for now (local Ray for feature retrieval)
+    # - name: RAY_ADDRESS
+    #   value: "feast-ray-head.feast-trainer-demo.svc.cluster.local:6379"
+    # Ray resource limits for local mode
+    - name: RAY_OBJECT_STORE_MEMORY
+      value: "500000000"
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      pip install --quiet "feast[postgres,ray]==0.59.0" psycopg2-binary scikit-learn joblib "ray[default]>=2.9.0" mlflow>=2.10.0
+
+      mkdir -p $FEATURE_REPO
+      cat > $FEATURE_REPO/feature_store.yaml << EOF
+      project: sales_forecasting
+      provider: local
+      registry:
+        registry_type: sql
+        path: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:5432/feast
+        cache_ttl_seconds: 60
+      offline_store:
+        type: ray
+        storage_path: $DATA_PATH/ray_storage
+        broadcast_join_threshold_mb: 50
+        max_parallelism_multiplier: 2
+        enable_ray_logging: true
+      batch_engine:
+        type: ray.engine
+        max_workers: 2
+        enable_optimization: true
+        enable_distributed_joins: true
+        enable_ray_logging: true
+      online_store:
+        type: postgres
+        host: $POSTGRES_HOST
+        port: 5432
+        database: feast
+        user: $POSTGRES_USER
+        password: $POSTGRES_PASSWORD
+      entity_key_serialization_version: 3
+      EOF
+
+      cat > /tmp/train_mlflow.py << 'TRAIN_SCRIPT'
+      import os
+      import logging
+      import numpy as np
+      import pandas as pd
+      import torch
+      import torch.nn as nn
+      import torch.distributed as dist
+      from torch.nn.parallel import DistributedDataParallel as DDP
+      from torch.utils.data import DataLoader, Dataset, DistributedSampler
+      from sklearn.preprocessing import StandardScaler
+      import joblib
+      import ray
+      import mlflow
+      import mlflow.pytorch
+      from feast import FeatureStore
+      from datetime import datetime
+
+      logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+      logger = logging.getLogger(__name__)
+
+      # Configuration
+      FEATURE_REPO = os.environ.get("FEATURE_REPO", "/shared/feature_repo")
+      DATA_PATH = os.environ.get("DATA_PATH", "/shared/data")
+      OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/shared/models")
+      NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 15))
+      VAL_START_DATE = os.environ.get("VAL_START_DATE", "2012-01-01")
+      MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+      MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "sales-forecasting")
+      RAY_ADDRESS = os.environ.get("RAY_ADDRESS", None)
+
+      # =================================================================
+      # MODEL DEFINITION
+      # =================================================================
+      class SalesMLP(nn.Module):
+          def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.2):
+              super().__init__()
+              layers = []
+              prev_dim = input_dim
+              for dim in hidden_dims:
+                  layers.extend([
+                      nn.Linear(prev_dim, dim),
+                      nn.BatchNorm1d(dim),
+                      nn.ReLU(),
+                      nn.Dropout(dropout)
+                  ])
+                  prev_dim = dim
+              layers.append(nn.Linear(prev_dim, 1))
+              self.net = nn.Sequential(*layers)
+              self.hidden_dims = hidden_dims
+              self.dropout = dropout
+              
+          def forward(self, x):
+              return self.net(x).squeeze(-1)
+
+      class SalesDataset(Dataset):
+          def __init__(self, X, y):
+              self.X = torch.tensor(X, dtype=torch.float32)
+              self.y = torch.tensor(y, dtype=torch.float32)
+          def __len__(self): return len(self.X)
+          def __getitem__(self, i): return self.X[i], self.y[i]
+
+      # =================================================================
+      # SETUP
+      # =================================================================
+      backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+      dist.init_process_group(backend=backend)
+      rank, world_size = dist.get_rank(), dist.get_world_size()
+      local_rank = int(os.environ.get("LOCAL_RANK", 0))
+      device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+      logger.info(f"DDP: rank={rank}/{world_size}, device={device}")
+
+      # =================================================================
+      # MLFLOW SETUP (Rank 0 only)
+      # =================================================================
+      if rank == 0:
+          mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+          mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+          
+          # Start MLflow run
+          run = mlflow.start_run(run_name=f"train-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+          logger.info(f"MLflow tracking URI: {MLFLOW_TRACKING_URI}")
+          logger.info(f"MLflow run ID: {run.info.run_id}")
+          
+          # Log initial parameters
+          mlflow.log_params({
+              "num_epochs": NUM_EPOCHS,
+              "val_start_date": VAL_START_DATE,
+              "world_size": world_size,
+              "device": str(device),
+              "feature_repo": FEATURE_REPO,
+          })
+
+      # =================================================================
+      # FEATURE RETRIEVAL VIA FEAST + RAY
+      # =================================================================
+      if rank == 0:
+          os.makedirs(OUTPUT_DIR, exist_ok=True)
+          
+          logger.info("=" * 60)
+          logger.info("FETCHING FEATURES FROM FEAST (Ray)")
+          logger.info("=" * 60)
+          
+          # Initialize Ray - connect to KubeRay cluster
+          if RAY_ADDRESS:
+              logger.info(f"Connecting to KubeRay cluster: {RAY_ADDRESS}")
+              ray.init(address=RAY_ADDRESS, ignore_reinit_error=True)
+          else:
+              logger.info("Using local Ray instance")
+              ray.init(
+                  ignore_reinit_error=True, 
+                  num_cpus=2,
+                  object_store_memory=500_000_000,
+              )
+          logger.info(f"Ray cluster: {ray.cluster_resources()}")
+          
+          # Initialize Feast
+          store = FeatureStore(repo_path=FEATURE_REPO)
+          logger.info(f"Connected to Feast registry")
+          
+          # Load entity dataframe
+          entity_df = pd.read_parquet(f"{DATA_PATH}/entities.parquet")
+          entity_df["date"] = pd.to_datetime(entity_df["date"])
+          entity_df = entity_df.rename(columns={"date": "event_timestamp"})
+          
+          logger.info(f"Entity DataFrame: {len(entity_df)} rows")
+          
+          # Feature list
+          feature_list = [
+              "sales_features:lag_1", "sales_features:lag_2", "sales_features:lag_4",
+              "sales_features:lag_8", "sales_features:lag_52",
+              "sales_features:rolling_mean_4w", "sales_features:rolling_std_4w",
+              "sales_features:rolling_mean_8w", "sales_features:rolling_std_8w",
+              "sales_features:rolling_mean_52w",
+              "store_features:store_size", "store_features:temperature",
+              "store_features:fuel_price", "store_features:cpi", "store_features:unemployment",
+              "store_features:markdown1", "store_features:markdown2", "store_features:markdown3",
+              "store_features:markdown4", "store_features:markdown5",
+              "store_features:is_holiday", "store_features:week_of_year", "store_features:month",
+          ]
+          
+          # Get historical features
+          logger.info("Fetching historical features...")
+          training_df = store.get_historical_features(
+              entity_df=entity_df,
+              features=feature_list,
+          ).to_df()
+          
+          logger.info(f"Features retrieved: {len(training_df)} rows, {len(training_df.columns)} columns")
+          
+          # Load target variable
+          full_df = pd.read_parquet(f"{DATA_PATH}/features.parquet")
+          full_df["date"] = pd.to_datetime(full_df["date"])
+          training_df["event_timestamp"] = training_df["event_timestamp"].dt.tz_localize(None)
+          
+          training_df = training_df.merge(
+              full_df[["store_id", "dept_id", "date", "weekly_sales"]].rename(columns={"date": "event_timestamp"}),
+              on=["store_id", "dept_id", "event_timestamp"],
+              how="left"
+          )
+          
+          # Temporal split
+          val_date = pd.to_datetime(VAL_START_DATE)
+          train_df = training_df[training_df["event_timestamp"] < val_date]
+          val_df = training_df[training_df["event_timestamp"] >= val_date]
+          
+          logger.info(f"Train: {len(train_df)}, Val: {len(val_df)}")
+          
+          # Log dataset info to MLflow
+          mlflow.log_params({
+              "total_rows": len(training_df),
+              "train_rows": len(train_df),
+              "val_rows": len(val_df),
+              "num_features": len(feature_list),
+          })
+          
+          # Feature columns
+          feature_cols = [c for c in training_df.columns 
+                          if c not in ["store_id", "dept_id", "event_timestamp", "weekly_sales"]
+                          and training_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+          
+          X_train = train_df[feature_cols].fillna(0).values
+          y_train = train_df["weekly_sales"].values
+          X_val = val_df[feature_cols].fillna(0).values
+          y_val = val_df["weekly_sales"].values
+          
+          # Scale features
+          scaler = StandardScaler()
+          X_train = scaler.fit_transform(X_train)
+          X_val = scaler.transform(X_val)
+          
+          # Scale target
+          y_scaler = StandardScaler()
+          y_train_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+          y_val_scaled = y_scaler.transform(y_val.reshape(-1, 1)).flatten()
+          
+          # Save scalers
+          joblib.dump(scaler, f"{OUTPUT_DIR}/scaler.pkl")
+          joblib.dump(y_scaler, f"{OUTPUT_DIR}/y_scaler.pkl")
+          joblib.dump(feature_cols, f"{OUTPUT_DIR}/feature_cols.pkl")
+          
+          # Shutdown Ray
+          ray.shutdown()
+          logger.info("Ray shutdown")
+          
+          # Save for other ranks
+          np.save(f"{OUTPUT_DIR}/.X_train.npy", X_train)
+          np.save(f"{OUTPUT_DIR}/.y_train.npy", y_train_scaled)
+          np.save(f"{OUTPUT_DIR}/.X_val.npy", X_val)
+          np.save(f"{OUTPUT_DIR}/.y_val.npy", y_val_scaled)
+          np.save(f"{OUTPUT_DIR}/.y_val_orig.npy", y_val)
+          
+          input_dim = X_train.shape[1]
+          np.save(f"{OUTPUT_DIR}/.input_dim.npy", np.array([input_dim]))
+          
+          logger.info("Features preprocessed and saved")
+
+      dist.barrier()
+
+      # Load data on all ranks
+      X_train = np.load(f"{OUTPUT_DIR}/.X_train.npy")
+      y_train = np.load(f"{OUTPUT_DIR}/.y_train.npy")
+      X_val = np.load(f"{OUTPUT_DIR}/.X_val.npy")
+      y_val = np.load(f"{OUTPUT_DIR}/.y_val.npy")
+      y_val_orig = np.load(f"{OUTPUT_DIR}/.y_val_orig.npy")
+      input_dim = int(np.load(f"{OUTPUT_DIR}/.input_dim.npy")[0])
+
+      dist.barrier()
+
+      # =================================================================
+      # TRAINING
+      # =================================================================
+      logger.info("=" * 60)
+      logger.info("TRAINING MODEL")
+      logger.info("=" * 60)
+
+      # Hyperparameters
+      BATCH_SIZE = 256
+      LEARNING_RATE = 1e-3
+      WEIGHT_DECAY = 1e-4
+      HIDDEN_DIMS = [256, 128, 64]
+      DROPOUT = 0.2
+
+      if rank == 0:
+          mlflow.log_params({
+              "batch_size": BATCH_SIZE,
+              "learning_rate": LEARNING_RATE,
+              "weight_decay": WEIGHT_DECAY,
+              "hidden_dims": str(HIDDEN_DIMS),
+              "dropout": DROPOUT,
+              "input_dim": input_dim,
+          })
+
+      train_ds = SalesDataset(X_train, y_train)
+      val_ds = SalesDataset(X_val, y_val)
+      sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank)
+      train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2)
+      val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
+      model = SalesMLP(input_dim, HIDDEN_DIMS, DROPOUT).to(device)
+      model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
+
+      optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+      scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
+      criterion = nn.MSELoss()
+
+      best_val_loss = float("inf")
+      best_mape = float("inf")
+
+      for epoch in range(NUM_EPOCHS):
+          sampler.set_epoch(epoch)
+          model.train()
+          train_loss = 0.0
+          
+          for X, y in train_loader:
+              X, y = X.to(device), y.to(device)
+              optimizer.zero_grad()
+              output = model(X)
+              loss = criterion(output, y)
+              loss.backward()
+              torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+              optimizer.step()
+              train_loss += loss.item()
+          
+          train_loss /= len(train_loader)
+          
+          # Validation
+          model.eval()
+          val_loss = 0.0
+          predictions, actuals = [], []
+          
+          with torch.no_grad():
+              for X, y in val_loader:
+                  output = model(X.to(device))
+                  val_loss += criterion(output, y.to(device)).item()
+                  predictions.extend(output.cpu().numpy())
+                  actuals.extend(y.numpy())
+          
+          val_loss /= len(val_loader)
+          scheduler.step(val_loss)
+          
+          if rank == 0:
+              predictions = np.array(predictions)
+              actuals = np.array(actuals)
+              
+              # Unscale predictions for MAPE
+              y_scaler = joblib.load(f"{OUTPUT_DIR}/y_scaler.pkl")
+              preds_orig = y_scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
+              
+              # Calculate MAPE
+              mask = np.abs(y_val_orig) > 1000
+              mape = np.mean(np.abs((y_val_orig[mask] - preds_orig[mask]) / y_val_orig[mask])) * 100 if mask.sum() > 0 else np.nan
+              rmse = np.sqrt(np.mean((y_val_orig - preds_orig) ** 2))
+              mae = np.mean(np.abs(y_val_orig - preds_orig))
+              
+              # Log metrics to MLflow
+              mlflow.log_metrics({
+                  "train_loss": train_loss,
+                  "val_loss": val_loss,
+                  "mape": mape,
+                  "rmse": rmse,
+                  "mae": mae,
+                  "learning_rate": optimizer.param_groups[0]['lr']
+              }, step=epoch)
+              
+              logger.info(f"Epoch {epoch+1}/{NUM_EPOCHS} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | MAPE: {mape:.1f}% | RMSE: {rmse:.0f}")
+              
+              if val_loss < best_val_loss:
+                  best_val_loss = val_loss
+                  best_mape = mape
+                  torch.save(model.module.state_dict(), f"{OUTPUT_DIR}/best_model.pt")
+                  logger.info("  → Saved best model")
+          
+          dist.barrier()
+
+      # =================================================================
+      # FINAL LOGGING TO MLFLOW
+      # =================================================================
+      if rank == 0:
+          # Log final metrics
+          mlflow.log_metrics({
+              "best_val_loss": best_val_loss,
+              "best_mape": best_mape,
+          })
+          
+          # Log model to MLflow
+          logger.info("Logging model to MLflow...")
+          
+          # Load best model
+          best_model = SalesMLP(input_dim, HIDDEN_DIMS, DROPOUT)
+          best_model.load_state_dict(torch.load(f"{OUTPUT_DIR}/best_model.pt"))
+          
+          # Log PyTorch model
+          mlflow.pytorch.log_model(
+              best_model,
+              "model",
+              registered_model_name="sales-forecasting-mlp",
+              pip_requirements=["torch>=2.0.0", "numpy", "pandas"]
+          )
+          
+          # Log artifacts
+          mlflow.log_artifact(f"{OUTPUT_DIR}/scaler.pkl")
+          mlflow.log_artifact(f"{OUTPUT_DIR}/y_scaler.pkl")
+          mlflow.log_artifact(f"{OUTPUT_DIR}/feature_cols.pkl")
+          
+          # End MLflow run
+          mlflow.end_run()
+          
+          logger.info(f"✅ Training complete!")
+          logger.info(f"   Best val_loss: {best_val_loss:.4f}")
+          logger.info(f"   Best MAPE: {best_mape:.1f}%")
+          logger.info(f"   Model logged to MLflow: sales-forecasting-mlp")
+          
+          # Cleanup temp files
+          for f in [".X_train.npy", ".y_train.npy", ".X_val.npy", ".y_val.npy", ".y_val_orig.npy", ".input_dim.npy"]:
+              try: os.remove(f"{OUTPUT_DIR}/{f}")
+              except: pass
+
+      dist.destroy_process_group()
+      TRAIN_SCRIPT
+
+      torchrun --nnodes=$PET_NNODES --nproc_per_node=$PET_NPROC_PER_NODE --node_rank=$PET_NODE_RANK \
+        --rdzv_backend=c10d --rdzv_endpoint=$PET_MASTER_ADDR:$PET_MASTER_PORT /tmp/train_mlflow.py
+

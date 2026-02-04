@@ -1,0 +1,488 @@
+# KServe Inference for Sales Forecasting Model
+# Deploys trained PyTorch model as a serverless inference endpoint
+#
+# Prerequisites:
+#   - Model trained and saved to /shared/models/ (10-feast-train-job.yaml)
+#   - KServe installed in the cluster
+#
+# Test with:
+#   curl -X POST https://<route>/v1/models/sales-forecast:predict \
+#     -H "Content-Type: application/json" \
+#     -d '{"instances": [[1.0, 2.0, 3.0, 4.0, 100000, 65.0, 2.5, 200.0, 5.0]]}'
+#
+---
+# Custom ServingRuntime for PyTorch models
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: pytorch-feast-runtime
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+spec:
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+  supportedModelFormats:
+    - name: pytorch
+      version: "1"
+      autoSelect: true
+  containers:
+    - name: kserve-container
+      image: quay.io/modh/ray:2.52.1-py312-cu128
+      command: ["python", "-u", "/mnt/models/serve.py"]
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      env:
+        - name: MODEL_DIR
+          value: /mnt/models
+        - name: PORT
+          value: "8080"
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      volumeMounts:
+        - name: model-storage
+          mountPath: /mnt/models
+          readOnly: false
+  volumes:
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: feast-pvc
+
+---
+# InferenceService for Sales Forecasting
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+    pipeline: sales-forecasting
+  annotations:
+    # Enable Prometheus metrics
+    serving.kserve.io/enable-prometheus-scraping: "true"
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 3
+    scaleTarget: 10
+    scaleMetric: concurrency
+    model:
+      modelFormat:
+        name: pytorch
+      runtime: pytorch-feast-runtime
+      storageUri: pvc://feast-pvc/models
+    containers:
+      - name: kserve-container
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command: ["python", "-u", "/scripts/serve.py"]
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        env:
+          - name: MODEL_PATH
+            value: /mnt/models/best_model.pt
+          - name: FEAST_REPO
+            value: /mnt/feature_repo
+          - name: PORT
+            value: "8080"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+          - name: model-storage
+            mountPath: /mnt
+    volumes:
+      - name: scripts
+        configMap:
+          name: kserve-inference-scripts
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: feast-pvc
+
+---
+# Inference Server Script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kserve-inference-scripts
+  namespace: feast-trainer-demo
+data:
+  serve.py: |
+    #!/usr/bin/env python3
+    """
+    KServe Inference Server for Sales Forecasting
+    
+    Endpoints:
+      - GET  /v1/models/sales-forecast         - Model metadata
+      - GET  /v1/models/sales-forecast/ready   - Readiness check
+      - POST /v1/models/sales-forecast:predict - Predict
+      - POST /v2/models/sales-forecast/infer   - V2 inference
+    
+    Features:
+      - Loads PyTorch model from PVC
+      - Optional: Fetches online features from Feast
+      - Returns sales predictions
+    """
+    import os
+    import json
+    import torch
+    import torch.nn as nn
+    import numpy as np
+    from pathlib import Path
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import logging
+    
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    # Configuration
+    MODEL_PATH = os.environ.get("MODEL_PATH", "/mnt/models/best_model.pt")
+    FEAST_REPO = os.environ.get("FEAST_REPO", "/mnt/feature_repo")
+    PORT = int(os.environ.get("PORT", 8080))
+    
+    # Model definition (must match training)
+    class SalesForecastModel(nn.Module):
+        def __init__(self, input_dim=9):
+            super().__init__()
+            self.network = nn.Sequential(
+                nn.Linear(input_dim, 128),
+                nn.BatchNorm1d(128),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(128, 64),
+                nn.BatchNorm1d(64),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(64, 32),
+                nn.ReLU(),
+                nn.Linear(32, 1)
+            )
+        
+        def forward(self, x):
+            return self.network(x).squeeze(-1)
+    
+    # Global model and scalers
+    model = None
+    scaler_X = None
+    scaler_y = None
+    feature_cols = None
+    feast_store = None
+    
+    def load_model():
+        """Load the trained model and scalers."""
+        global model, scaler_X, scaler_y, feature_cols
+        
+        logger.info(f"Loading model from {MODEL_PATH}")
+        
+        if not Path(MODEL_PATH).exists():
+            logger.warning(f"Model not found at {MODEL_PATH}, using random weights")
+            model = SalesForecastModel()
+            scaler_X = None
+            scaler_y = None
+            feature_cols = ["lag_1", "lag_2", "lag_4", "rolling_mean_4w", 
+                           "store_size", "temperature", "fuel_price", "cpi", "unemployment"]
+            return
+        
+        checkpoint = torch.load(MODEL_PATH, map_location="cpu")
+        
+        model = SalesForecastModel()
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        
+        scaler_X = checkpoint.get("scaler_X")
+        scaler_y = checkpoint.get("scaler_y")
+        feature_cols = checkpoint.get("feature_cols", [
+            "lag_1", "lag_2", "lag_4", "rolling_mean_4w",
+            "store_size", "temperature", "fuel_price", "cpi", "unemployment"
+        ])
+        
+        logger.info(f"Model loaded successfully. Features: {feature_cols}")
+        if "metrics" in checkpoint:
+            logger.info(f"Model metrics: {checkpoint['metrics']}")
+    
+    def init_feast():
+        """Initialize Feast for online feature retrieval."""
+        global feast_store
+        try:
+            from feast import FeatureStore
+            if Path(FEAST_REPO).exists():
+                feast_store = FeatureStore(repo_path=FEAST_REPO)
+                logger.info(f"Feast initialized from {FEAST_REPO}")
+            else:
+                logger.warning(f"Feast repo not found at {FEAST_REPO}")
+        except Exception as e:
+            logger.warning(f"Could not initialize Feast: {e}")
+    
+    def predict(instances):
+        """Make predictions on input instances."""
+        global model, scaler_X, scaler_y
+        
+        # Convert to numpy array
+        X = np.array(instances, dtype=np.float32)
+        
+        # Scale if scaler available
+        if scaler_X is not None:
+            X = scaler_X.transform(X)
+        
+        # Convert to tensor and predict
+        X_tensor = torch.FloatTensor(X)
+        
+        with torch.no_grad():
+            predictions = model(X_tensor).numpy()
+        
+        # Inverse scale if scaler available
+        if scaler_y is not None:
+            predictions = scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+        
+        return predictions.tolist()
+    
+    def get_online_features(entity_rows):
+        """Get online features from Feast for inference."""
+        global feast_store
+        
+        if feast_store is None:
+            return None
+        
+        try:
+            features = feast_store.get_online_features(
+                features=[
+                    "sales_features:lag_1",
+                    "sales_features:lag_2",
+                    "sales_features:lag_4",
+                    "sales_features:rolling_mean_4w",
+                    "store_features:store_size",
+                    "store_features:temperature",
+                    "store_features:fuel_price",
+                    "store_features:cpi",
+                    "store_features:unemployment",
+                ],
+                entity_rows=entity_rows,
+            ).to_dict()
+            return features
+        except Exception as e:
+            logger.error(f"Error fetching online features: {e}")
+            return None
+    
+    class InferenceHandler(BaseHTTPRequestHandler):
+        """HTTP request handler for KServe inference."""
+        
+        def log_message(self, format, *args):
+            logger.info(f"{self.address_string()} - {format % args}")
+        
+        def _set_headers(self, status=200, content_type="application/json"):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+        
+        def do_GET(self):
+            """Handle GET requests."""
+            if self.path == "/" or self.path == "/v1/models/sales-forecast":
+                self._set_headers()
+                response = {
+                    "name": "sales-forecast",
+                    "version": "v1",
+                    "framework": "pytorch",
+                    "features": feature_cols,
+                    "ready": model is not None,
+                }
+                self.wfile.write(json.dumps(response).encode())
+            
+            elif self.path == "/v1/models/sales-forecast/ready" or self.path == "/health":
+                if model is not None:
+                    self._set_headers(200)
+                    self.wfile.write(b'{"status": "ready"}')
+                else:
+                    self._set_headers(503)
+                    self.wfile.write(b'{"status": "not ready"}')
+            
+            elif self.path == "/metrics":
+                self._set_headers(200, "text/plain")
+                self.wfile.write(b"# HELP model_ready Model readiness\n")
+                self.wfile.write(f"model_ready {1 if model else 0}\n".encode())
+            
+            else:
+                self._set_headers(404)
+                self.wfile.write(b'{"error": "Not found"}')
+        
+        def do_POST(self):
+            """Handle POST requests for inference."""
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            
+            try:
+                request = json.loads(body)
+            except json.JSONDecodeError:
+                self._set_headers(400)
+                self.wfile.write(b'{"error": "Invalid JSON"}')
+                return
+            
+            # V1 predict endpoint
+            if self.path == "/v1/models/sales-forecast:predict":
+                instances = request.get("instances", [])
+                
+                if not instances:
+                    self._set_headers(400)
+                    self.wfile.write(b'{"error": "No instances provided"}')
+                    return
+                
+                predictions = predict(instances)
+                
+                self._set_headers()
+                response = {"predictions": predictions}
+                self.wfile.write(json.dumps(response).encode())
+            
+            # V2 infer endpoint
+            elif self.path == "/v2/models/sales-forecast/infer":
+                inputs = request.get("inputs", [])
+                
+                if not inputs:
+                    self._set_headers(400)
+                    self.wfile.write(b'{"error": "No inputs provided"}')
+                    return
+                
+                # Extract data from V2 format
+                instances = inputs[0].get("data", []) if inputs else []
+                predictions = predict(instances)
+                
+                self._set_headers()
+                response = {
+                    "model_name": "sales-forecast",
+                    "model_version": "v1",
+                    "outputs": [
+                        {
+                            "name": "predictions",
+                            "datatype": "FP32",
+                            "shape": [len(predictions)],
+                            "data": predictions
+                        }
+                    ]
+                }
+                self.wfile.write(json.dumps(response).encode())
+            
+            # Feast online features endpoint
+            elif self.path == "/v1/features":
+                entity_rows = request.get("entity_rows", [])
+                
+                if not entity_rows:
+                    self._set_headers(400)
+                    self.wfile.write(b'{"error": "No entity_rows provided"}')
+                    return
+                
+                features = get_online_features(entity_rows)
+                
+                if features:
+                    self._set_headers()
+                    self.wfile.write(json.dumps(features).encode())
+                else:
+                    self._set_headers(503)
+                    self.wfile.write(b'{"error": "Feast not available"}')
+            
+            else:
+                self._set_headers(404)
+                self.wfile.write(b'{"error": "Not found"}')
+    
+    def main():
+        """Start the inference server."""
+        logger.info("=" * 60)
+        logger.info("SALES FORECAST INFERENCE SERVER")
+        logger.info("=" * 60)
+        
+        # Load model
+        load_model()
+        
+        # Initialize Feast (optional)
+        init_feast()
+        
+        # Start server
+        server = HTTPServer(("0.0.0.0", PORT), InferenceHandler)
+        logger.info(f"Server started on port {PORT}")
+        logger.info(f"Endpoints:")
+        logger.info(f"  GET  /v1/models/sales-forecast         - Model info")
+        logger.info(f"  GET  /v1/models/sales-forecast/ready   - Health check")
+        logger.info(f"  POST /v1/models/sales-forecast:predict - V1 predict")
+        logger.info(f"  POST /v2/models/sales-forecast/infer   - V2 infer")
+        logger.info(f"  POST /v1/features                      - Feast online features")
+        
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("Server stopped")
+            server.server_close()
+    
+    if __name__ == "__main__":
+        main()
+
+---
+# Test Job for Inference
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inference-test
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "=== Testing Sales Forecast Inference ==="
+              
+              # Wait for service to be ready
+              echo "Waiting for inference service..."
+              sleep 30
+              
+              # Test health
+              echo -e "\n1. Health Check:"
+              curl -s http://sales-forecast-predictor.feast-trainer-demo.svc.cluster.local:8080/health
+              
+              # Test model info
+              echo -e "\n\n2. Model Info:"
+              curl -s http://sales-forecast-predictor.feast-trainer-demo.svc.cluster.local:8080/v1/models/sales-forecast
+              
+              # Test prediction (V1 format)
+              echo -e "\n\n3. V1 Prediction:"
+              curl -s -X POST http://sales-forecast-predictor.feast-trainer-demo.svc.cluster.local:8080/v1/models/sales-forecast:predict \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "instances": [
+                    [25000.0, 24000.0, 23000.0, 24500.0, 100000, 65.0, 2.75, 210.0, 5.5],
+                    [30000.0, 29000.0, 28000.0, 29500.0, 150000, 70.0, 2.80, 215.0, 5.0]
+                  ]
+                }'
+              
+              # Test prediction (V2 format)
+              echo -e "\n\n4. V2 Inference:"
+              curl -s -X POST http://sales-forecast-predictor.feast-trainer-demo.svc.cluster.local:8080/v2/models/sales-forecast/infer \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "inputs": [{
+                    "name": "features",
+                    "shape": [1, 9],
+                    "datatype": "FP32",
+                    "data": [[25000.0, 24000.0, 23000.0, 24500.0, 100000, 65.0, 2.75, 210.0, 5.5]]
+                  }]
+                }'
+              
+              echo -e "\n\n=== Test Complete ==="
+  backoffLimit: 2
+

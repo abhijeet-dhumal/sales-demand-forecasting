@@ -1,68 +1,143 @@
-# Kubernetes Manifests
+# Sales Forecasting - Kubernetes Manifests
+
+End-to-end ML pipeline with **Feast**, **Ray**, and **KServe** on OpenShift/Kubernetes.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     feast-trainer-demo namespace                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
+│  │ PostgreSQL   │    │   MLflow     │    │  KubeRay     │          │
+│  │ (Feast       │    │ (Experiment  │    │  Cluster     │          │
+│  │  Registry)   │    │  Tracking)   │    │ (Head +      │          │
+│  └──────────────┘    └──────────────┘    │  Workers)    │          │
+│         │                   │            └──────┬───────┘          │
+│         │                   │                   │                   │
+│         ▼                   ▼                   ▼                   │
+│  ┌──────────────────────────────────────────────────────────┐      │
+│  │                     ML Pipeline                          │      │
+│  │                                                          │      │
+│  │  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌───────┐ │      │
+│  │  │  Data   │───▶│ Feature │───▶│ Train   │───▶│KServe │ │      │
+│  │  │  Prep   │    │  Store  │    │ Model   │    │Infer  │ │      │
+│  │  └─────────┘    └─────────┘    └─────────┘    └───────┘ │      │
+│  │                                                          │      │
+│  └──────────────────────────────────────────────────────────┘      │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────┐       │
+│  │              NFS Shared Storage (feast-pvc)             │       │
+│  │  /shared/data, /shared/feature_repo, /shared/models     │       │
+│  └─────────────────────────────────────────────────────────┘       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
 ```bash
-# 1. Create namespace and storage
+# 1. Infrastructure
 kubectl apply -f 01-namespace.yaml
 kubectl apply -f 02-pvc-shared-storage.yaml
-
-# 2. (Optional) Deploy Feast PostgreSQL
 kubectl apply -f 05-feast-postgres.yaml
+kubectl apply -f 06-mlflow.yaml
+kubectl apply -f 07-kuberay-cluster.yaml
+kubectl apply -f 08-feast-prereqs.yaml
 
-# 3. Create custom ClusterTrainingRuntime
-kubectl apply -f 03-clustertrainingruntime.yaml
+# 2. Wait for Ray cluster
+kubectl wait --for=condition=ready pod -l app=feast-ray -n feast-trainer-demo --timeout=120s
 
-# 4. Submit TrainJob
-kubectl apply -f 04-trainjob.yaml
+# 3. Data Preparation (generates data + Feast features)
+kubectl apply -f 09-feast-dataprep-job.yaml
 
-# Monitor job
-kubectl get trainjobs -n feast-trainer-demo
-kubectl logs -f -n feast-trainer-demo -l trainer.kubeflow.org/trainjob-name=sales-forecasting-training
+# 4. Train Model
+kubectl apply -f 10-feast-train-job.yaml
+
+# 5. Deploy KServe Inference
+kubectl apply -f 11-kserve-inference.yaml
+
+# 6. Test Inference
+kubectl apply -f 11-kserve-inference.yaml  # Includes test job
 ```
 
-## Manifests
+## Manifest Files
 
-| File | Description |
-|------|-------------|
-| `01-namespace.yaml` | Namespace for training jobs |
-| `02-pvc-shared-storage.yaml` | PVCs for data and models |
-| `03-clustertrainingruntime.yaml` | Custom runtime with Feast support |
-| `04-trainjob.yaml` | TrainJob v2 example |
-| `05-feast-postgres.yaml` | PostgreSQL for Feast (optional) |
-| `06-trainjob-customtrainer.yaml` | SDK-style CustomTrainer pattern |
+| # | File | Description |
+|---|------|-------------|
+| 01 | `namespace.yaml` | Namespace: feast-trainer-demo |
+| 02 | `pvc-shared-storage.yaml` | NFS storage (RWX) |
+| 03 | `clustertrainingruntime.yaml` | Kubeflow runtime (alt) |
+| 04 | `trainjob.yaml` | Kubeflow job (alt) |
+| 05 | `feast-postgres.yaml` | PostgreSQL for Feast |
+| 06 | `mlflow.yaml` | MLflow tracking |
+| **07** | `kuberay-cluster.yaml` | **Ray cluster** |
+| **08** | `feast-prereqs.yaml` | **SA, RBAC, PVC** |
+| **09** | `feast-dataprep-job.yaml` | **Data prep + Feast** |
+| **10** | `feast-train-job.yaml` | **Model training** |
+| **11** | `kserve-inference.yaml` | **KServe inference** |
+| 12 | `trainjob-mlflow.yaml` | Kubeflow + MLflow (alt) |
 
-## Using SDK Instead of Raw Manifests
+## Pipeline Details
 
-The SDK is preferred over raw manifests:
+### 1. Data Preparation (`09-feast-dataprep-job.yaml`)
+- Generates 93,600 sales records
+- Configures Feast with Ray offline store
+- Registers feature views in PostgreSQL
+- Materializes features to online store
 
-```python
-from kubeflow.trainer import TrainerClient, CustomTrainer
+### 2. Model Training (`10-feast-train-job.yaml`)
+- Fetches historical features from Feast via Ray
+- Trains PyTorch neural network
+- Saves model to `/shared/models/`
 
-client = TrainerClient()
-job = client.train(
-    runtime="torch-feast",  # Uses our custom runtime
-    trainer=CustomTrainer(
-        func=train_function,
-        num_nodes=2,
-        resources_per_node={"cpu": 8, "memory": "32Gi"},
-    ),
-)
+### 3. KServe Inference (`11-kserve-inference.yaml`)
+- Deploys model as serverless endpoint
+- Auto-scales 1-3 replicas
+- Supports V1 and V2 inference protocols
+- Optional: Fetches online features from Feast
+
+**Inference Endpoints:**
+```
+GET  /v1/models/sales-forecast         - Model metadata
+GET  /v1/models/sales-forecast/ready   - Health check
+POST /v1/models/sales-forecast:predict - V1 predict
+POST /v2/models/sales-forecast/infer   - V2 inference
+POST /v1/features                      - Feast online features
 ```
 
-The SDK handles:
-- Function serialization
-- Package installation
-- Environment setup
-- TrainJob creation
+**Example Request:**
+```bash
+curl -X POST https://<route>/v1/models/sales-forecast:predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instances": [
+      [25000.0, 24000.0, 23000.0, 24500.0, 100000, 65.0, 2.75, 210.0, 5.5]
+    ]
+  }'
+```
 
-## TrainJob v2 vs PyTorchJob
+## Dashboards
 
-| Aspect | PyTorchJob (v1) | TrainJob (v2) |
-|--------|-----------------|---------------|
-| API Group | `kubeflow.org/v1` | `trainer.kubeflow.org/v1alpha1` |
-| Runtime Config | Embedded | `ClusterTrainingRuntime` (reusable) |
-| Initializers | Manual | Built-in (model, dataset) |
-| Checkpointing | Manual | JIT checkpoint support |
-| Progression | None | HTTP metrics endpoint |
+| Service | URL |
+|---------|-----|
+| Ray Dashboard | https://feast-ray-dashboard-feast-trainer-demo.apps.<cluster>/ |
+| MLflow | https://mlflow-feast-trainer-demo.apps.<cluster>/ |
+| KServe Route | https://sales-forecast-feast-trainer-demo.apps.<cluster>/ |
 
+## Key Technologies
+
+- **Feast**: Feature store with PostgreSQL registry & online store
+- **Ray/KubeRay**: Distributed data processing
+- **KServe**: Serverless model inference
+- **MLflow**: Experiment tracking (optional)
+- **PyTorch**: Neural network training
+
+## Image Versions
+
+| Component | Image |
+|-----------|-------|
+| Ray | `quay.io/modh/ray:2.52.1-py312-cu128` |
+| PostgreSQL | `quay.io/sclorg/postgresql-16-c9s:latest` |

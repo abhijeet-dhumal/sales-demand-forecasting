@@ -1,120 +1,181 @@
-# Sales Demand Forecasting v2
+# Sales Demand Forecasting - Industry-Grade Quickstart
 
-**Using TrainJob v2 API with Kubeflow SDK**
+An end-to-end ML pipeline demonstrating **Kubeflow Trainer + Feast Feature Store** integration on OpenShift AI / Red Hat AI.
 
-## Key Improvements over v1
+## 🎯 Key Results
 
-| Issue | v1 (Legacy) | v2 (Fixed) |
-|-------|-------------|------------|
-| **Training API** | `PyTorchJob` | **`TrainJob v2`** (`trainer.kubeflow.org/v1alpha1`) |
-| **SDK** | Manual job creation | **`TrainerClient` + `CustomTrainer`** |
-| **Data Leakage** | Features derived from target | **Only lag/historical features** |
-| **Train/Val Split** | Random chunks | **Temporal split by date** |
-| **Feast Version** | 0.54.0 | **0.59.0** |
+| Metric | Value |
+|--------|-------|
+| **Model MAPE** | 9.9% |
+| **Improvement** | 87.5% vs naive baseline |
+| **Training Time** | ~30 seconds (4 GPUs) |
+| **Feature Retrieval** | PostgreSQL online store |
 
-## Directory Structure
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     OpenShift AI Cluster                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐                     │
+│  │ Data Prep Job   │    │ Feast PostgreSQL│                     │
+│  │ (Synthetic Data)│───▶│    (Registry,   │                     │
+│  │ Feature Eng.    │    │  Online Store)  │                     │
+│  │ feast apply     │    └────────┬────────┘                     │
+│  └────────┬────────┘             │                              │
+│           │                      │                              │
+│           ▼                      ▼                              │
+│  ┌─────────────────────────────────────────────────┐            │
+│  │              Shared PVC (NFS)                   │            │
+│  │  /shared/data     - Feature parquet files      │            │
+│  │  /shared/models   - Trained models, scalers    │            │
+│  │  /shared/feature_repo - Feast config           │            │
+│  └───────────────────────────────────────────────┬─┘            │
+│                                                  │              │
+│  ┌──────────────────────┐     ┌──────────────────┴──────┐       │
+│  │    TrainJob v2       │     │    Inference Job        │       │
+│  │  ┌───────────────┐   │     │  ┌───────────────┐      │       │
+│  │  │ Feast SDK     │   │     │  │ Feast SDK     │      │       │
+│  │  │ get_historical│   │     │  │ get_online    │      │       │
+│  │  │ _features()   │   │     │  │ _features()   │      │       │
+│  │  └───────┬───────┘   │     │  └───────┬───────┘      │       │
+│  │          │           │     │          │              │       │
+│  │  ┌───────▼───────┐   │     │  ┌───────▼───────┐      │       │
+│  │  │ PyTorch DDP   │   │     │  │ Model Predict │      │       │
+│  │  │ (4 GPUs)      │   │     │  │ Compare Base  │      │       │
+│  │  └───────────────┘   │     │  └───────────────┘      │       │
+│  └──────────────────────┘     └─────────────────────────┘       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 📦 Components
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| **Feature Store** | Feast + PostgreSQL | Feature registry, online serving |
+| **Training** | Kubeflow Trainer v2 | Distributed PyTorch training |
+| **Model** | MLP (256→128→64→1) | Sales forecasting |
+| **Storage** | NFS PVC (RWX) | Shared data/models |
+| **Runtime** | torch-with-storage | Custom ClusterTrainingRuntime |
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- OpenShift AI / RHOAI cluster
+- `kubectl` configured
+- Namespace: `feast-trainer-demo`
+
+### Deploy
+
+```bash
+# 1. Create namespace and storage
+kubectl create namespace feast-trainer-demo
+kubectl apply -f v2/manifests/02-pvc-shared-storage.yaml
+kubectl apply -f v2/manifests/03-clustertrainingruntime.yaml
+
+# 2. Deploy Feast PostgreSQL
+kubectl apply -f v2/manifests/05-feast-postgres.yaml
+kubectl wait --for=condition=available deployment/feast-postgres -n feast-trainer-demo --timeout=120s
+
+# 3. Prepare data & register features
+kubectl apply -f v2/manifests/data-prep-job.yaml
+kubectl wait --for=condition=complete job/feast-data-prep -n feast-trainer-demo --timeout=300s
+
+# 4. Train model (fetches features via Feast)
+kubectl apply -f v2/manifests/04-trainjob.yaml
+kubectl wait --for=jsonpath='{.status.state}'=Complete trainjob/sales-forecasting -n feast-trainer-demo --timeout=600s
+
+# 5. Run inference
+kubectl apply -f v2/manifests/07-inference-job.yaml
+kubectl logs -n feast-trainer-demo -l job-name=feast-inference -f
+```
+
+## 📊 Features Used
+
+### Sales Features (Historical)
+- `lag_1`, `lag_2`, `lag_4`, `lag_8`, `lag_52` - Past sales
+- `rolling_mean_4w`, `rolling_std_4w` - 4-week rolling stats
+- `rolling_mean_8w`, `rolling_std_8w` - 8-week rolling stats
+- `rolling_mean_52w` - 52-week (YoY) rolling mean
+
+### Store Features (External)
+- `store_size`, `temperature`, `fuel_price`, `cpi`, `unemployment`
+- `markdown1` - `markdown5` - Promotion markdowns
+- `is_holiday`, `week_of_year`, `month` - Calendar features
+
+### No Data Leakage ✅
+- All lag features use `.shift(1)` before rolling
+- Target (`weekly_sales`) never used as input feature
+- Temporal train/val split (2010-2011 train, 2012 val)
+
+## 🔧 Configuration
+
+### Feast Feature Store
+```yaml
+# feature_store.yaml
+project: sales_forecasting
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://feast:feast123@feast-postgres:5432/feast
+offline_store:
+  type: file  # Parquet files
+online_store:
+  type: postgres  # Real-time serving
+```
+
+### Training Parameters
+```yaml
+# 04-trainjob.yaml
+numNodes: 1
+numProcPerNode: 4  # 4 GPUs
+epochs: 10
+batch_size: 256
+learning_rate: 1e-3
+```
+
+## 📁 File Structure
 
 ```
 v2/
-├── feature_repo/           # Feast feature definitions
-│   ├── feature_store.yaml  # Feast configuration
-│   └── features.py         # Feature views (no data leakage)
-├── training/
-│   └── train.py            # Standalone training script
-├── notebooks/
-│   ├── 01_data_preparation.ipynb  # Data prep + Feast setup
-│   ├── 02_training.ipynb          # TrainJob submission
-│   └── 03_inference.ipynb         # Model evaluation
-├── manifests/              # Kubernetes manifests (optional)
-├── requirements.txt        # Pinned dependencies
+├── manifests/
+│   ├── 01-namespace.yaml           # feast-trainer-demo
+│   ├── 02-pvc-shared-storage.yaml  # NFS PVCs
+│   ├── 03-clustertrainingruntime.yaml  # torch-with-storage
+│   ├── 04-trainjob.yaml            # Training with Feast
+│   ├── 05-feast-postgres.yaml      # PostgreSQL + init
+│   ├── 07-inference-job.yaml       # Inference with Feast
+│   └── data-prep-job.yaml          # Data + feast apply
+├── feature_repo/
+│   ├── feature_store.yaml          # Feast config
+│   └── features.py                 # Feature definitions
 └── README.md
 ```
 
-## Quick Start
+## 🎓 Key Learnings
 
-### 1. Install Dependencies
+1. **Feast Integration**: Use `get_historical_features()` for training (point-in-time join), `get_online_features()` for real-time inference
+2. **TrainJob v2**: Use `ClusterTrainingRuntime` for shared storage, not inline volume mounts
+3. **OpenShift**: Use `nfs-csi` storage class for RWX access
+4. **DDP Training**: `torchrun` with `PET_*` environment variables from TrainJob status
 
-```bash
-pip install -r requirements.txt
-# Or install ODH SDK from source:
-pip install git+https://github.com/opendatahub-io/kubeflow-sdk.git
-```
-
-### 2. Prepare Data
-
-```bash
-cd notebooks
-jupyter lab 01_data_preparation.ipynb
-```
-
-### 3. Submit Training Job
-
-```python
-from kubeflow.trainer import TrainerClient, CustomTrainer
-
-client = TrainerClient()
-
-job_name = client.train(
-    runtime="torch-distributed",
-    trainer=CustomTrainer(
-        func=train_sales_forecast,  # Self-contained function
-        num_nodes=2,
-        resources_per_node={"cpu": 8, "memory": "32Gi"},
-        packages_to_install=["torch", "feast==0.59.0", "pandas"],
-    ),
-)
-
-# Stream logs
-for log in client.get_job_logs(job_name, follow=True):
-    print(log, end="")
-```
-
-### 4. Local Testing (No Cluster)
-
-```python
-from kubeflow.trainer import TrainerClient, CustomTrainer, LocalProcessBackendConfig
-
-client = TrainerClient(backend_config=LocalProcessBackendConfig())
-job_name = client.train(
-    trainer=CustomTrainer(func=train_sales_forecast, ...),
-)
-```
-
-## SDK Trainer Options
-
-| Trainer | Use Case |
-|---------|----------|
-| `CustomTrainer` | User-defined Python function |
-| `CustomTrainerContainer` | Pre-built container image |
-| `BuiltinTrainer` | TorchTune LLM fine-tuning |
-| `TransformersTrainer` | HuggingFace Transformers/TRL |
-| `TrainingHubTrainer` | RHAI Training Hub (SFT/OSFT) |
-
-## Feature Engineering (No Data Leakage)
-
-**Safe features (used in v2):**
-- `lag_1`, `lag_2`, `lag_4`, `lag_8`, `lag_52` (historical sales)
-- `rolling_mean_4w`, `rolling_mean_8w` (computed from past data)
-- `temperature`, `fuel_price`, `cpi` (external factors)
-- `is_holiday`, `week_of_year` (calendar features)
-
-**Removed features (caused data leakage in v1):**
-- ❌ `sales_normalized` (derived from current week's sales)
-- ❌ `sales_per_sqft` (derived from current week's sales)
-- ❌ `markdown_efficiency` (derived from current week's sales)
-
-## Temporal Split
+## 📈 Results
 
 ```
-2010-02  ──────────────────  2011-12  ──  2012-01  ────────  2012-10
-          TRAINING SET                      VALIDATION SET
+Model                            MAPE           RMSE            MAE
+-------------------------------------------------------------------
+Base (Random)                   62.0%         31,627         24,985
+Naive (Mean)                    78.6%         28,376         23,847
+Trained (Feast)                  9.9%          6,471          4,608
+
+✅ Improvement vs Naive: 87.5%
 ```
 
-**NOT** random 80/20 splits which leak future data into training.
+## 🔗 References
 
-## References
-
-- [ODH Trainer](https://github.com/opendatahub-io/trainer) - TrainJob v2 CRD
-- [ODH Kubeflow SDK](https://github.com/opendatahub-io/kubeflow-sdk) - Python SDK
-- [Feast](https://github.com/feast-dev/feast) - Feature Store v0.59.0
-
+- [Kubeflow Trainer](https://github.com/opendatahub-io/trainer)
+- [Kubeflow SDK](https://github.com/opendatahub-io/kubeflow-sdk)
+- [Feast Feature Store](https://github.com/feast-dev/feast)
+- [Red Hat AI Quickstarts](https://github.com/rh-ai-quickstarts)
