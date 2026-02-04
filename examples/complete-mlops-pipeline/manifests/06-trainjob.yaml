@@ -8,7 +8,7 @@ apiVersion: trainer.kubeflow.org/v1alpha1
 kind: TrainJob
 metadata:
   name: sales-forecasting-mlflow
-  namespace: feast-trainer-demo
+  namespace: feast-mlops-demo
   labels:
     app.kubernetes.io/name: sales-forecasting-mlflow
 spec:
@@ -31,17 +31,17 @@ spec:
     - name: OUTPUT_DIR
       value: /shared/models
     - name: NUM_EPOCHS
-      value: "100"
+      value: "15"
     # MLflow configuration
     - name: MLFLOW_TRACKING_URI
-      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+      value: "http://mlflow.feast-mlops-demo.svc.cluster.local:5000"
     - name: MLFLOW_EXPERIMENT_NAME
       value: "sales-forecasting"
     - name: MLFLOW_ARTIFACT_ROOT
       value: "/shared/mlflow-artifacts"
-    # Model Registry configuration (in rhoai-model-registries namespace)
+    # Model Registry configuration
     - name: MODEL_REGISTRY_URI
-      value: "sales-model-registry-rest.rhoai-model-registries.svc.cluster.local"
+      value: "sales-model-registry.feast-mlops-demo.svc.cluster.local:8080"
     # Note: Using pre-computed training data from dataprep job
     # This is the recommended production pattern:
     # - Dataprep creates training datasets (via Feast + KubeRay)
@@ -81,80 +81,28 @@ spec:
       MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "sales-forecasting")
 
       # =================================================================
-      # MODEL DEFINITION - Advanced ResNet-style MLP with Attention
+      # MODEL DEFINITION
       # =================================================================
-      class ResidualBlock(nn.Module):
-          """Residual block with skip connection for better gradient flow"""
-          def __init__(self, dim, dropout=0.1):
-              super().__init__()
-              self.block = nn.Sequential(
-                  nn.Linear(dim, dim * 2),
-                  nn.LayerNorm(dim * 2),
-                  nn.GELU(),
-                  nn.Dropout(dropout),
-                  nn.Linear(dim * 2, dim),
-                  nn.LayerNorm(dim),
-              )
-              self.dropout = nn.Dropout(dropout)
-              
-          def forward(self, x):
-              return x + self.dropout(self.block(x))
-      
-      class FeatureAttention(nn.Module):
-          """Self-attention to learn feature importance"""
-          def __init__(self, dim):
-              super().__init__()
-              self.query = nn.Linear(dim, dim)
-              self.key = nn.Linear(dim, dim)
-              self.value = nn.Linear(dim, dim)
-              self.scale = dim ** -0.5
-              
-          def forward(self, x):
-              q, k, v = self.query(x), self.key(x), self.value(x)
-              attn = torch.softmax(q * k * self.scale, dim=-1)
-              return x + attn * v
-      
       class SalesMLP(nn.Module):
-          def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.1):
+          def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.2):
               super().__init__()
-              self.hidden_dims = hidden_dims
-              self.dropout = dropout
-              
-              # Input projection
-              self.input_proj = nn.Sequential(
-                  nn.Linear(input_dim, hidden_dims[0]),
-                  nn.LayerNorm(hidden_dims[0]),
-                  nn.GELU(),
-              )
-              
-              # Feature attention
-              self.attention = FeatureAttention(hidden_dims[0])
-              
-              # Residual blocks
-              self.res_blocks = nn.ModuleList([
-                  ResidualBlock(hidden_dims[0], dropout) for _ in range(3)
-              ])
-              
-              # Output layers with gradual reduction
               layers = []
-              prev_dim = hidden_dims[0]
-              for dim in hidden_dims[1:]:
+              prev_dim = input_dim
+              for dim in hidden_dims:
                   layers.extend([
                       nn.Linear(prev_dim, dim),
-                      nn.LayerNorm(dim),
-                      nn.GELU(),
+                      nn.BatchNorm1d(dim),
+                      nn.ReLU(),
                       nn.Dropout(dropout)
                   ])
                   prev_dim = dim
               layers.append(nn.Linear(prev_dim, 1))
-              self.output = nn.Sequential(*layers)
+              self.net = nn.Sequential(*layers)
+              self.hidden_dims = hidden_dims
+              self.dropout = dropout
               
           def forward(self, x):
-              x = self.input_proj(x)
-              x = self.attention(x)
-              for block in self.res_blocks:
-                  x = block(x)
-              return self.output(x).squeeze(-1)
+              return self.net(x).squeeze(-1)
 
       class SalesDataset(Dataset):
           def __init__(self, X, y):
@@ -287,31 +235,21 @@ spec:
       logger.info("TRAINING MODEL")
       logger.info("=" * 60)
 
-      # Hyperparameters (ADVANCED OPTIMIZED v3)
-      BATCH_SIZE = 128  # Smaller batch for better generalization
-      LEARNING_RATE = 3e-4  # Lower LR for attention model
-      WEIGHT_DECAY = 1e-3  # Stronger regularization
-      HIDDEN_DIMS = [256, 128, 64]  # Residual blocks handle depth
-      DROPOUT = 0.1  # Lower dropout with LayerNorm
-      EARLY_STOP_PATIENCE = 20  # More patience for attention
-      GRAD_ACCUM_STEPS = 2  # Effective batch size = 256
+      # Hyperparameters
+      BATCH_SIZE = 256
+      LEARNING_RATE = 1e-3
+      WEIGHT_DECAY = 1e-4
+      HIDDEN_DIMS = [256, 128, 64]
+      DROPOUT = 0.2
 
       if rank == 0:
           mlflow.log_params({
               "batch_size": BATCH_SIZE,
-              "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
               "learning_rate": LEARNING_RATE,
-              "max_lr": LEARNING_RATE * 10,
               "weight_decay": WEIGHT_DECAY,
               "hidden_dims": str(HIDDEN_DIMS),
               "dropout": DROPOUT,
               "input_dim": input_dim,
-              "scheduler": "OneCycleLR",
-              "loss_fn": "MSE+Huber(0.7+0.3)",
-              "model_type": "ResNet-MLP-Attention",
-              "residual_blocks": 3,
-              "early_stop_patience": EARLY_STOP_PATIENCE,
-              "run_type": "advanced_v3",
           })
 
       train_ds = SalesDataset(X_train, y_train)
@@ -324,43 +262,26 @@ spec:
       model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
 
       optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-      # OneCycleLR - better than CosineAnnealing for many tasks
-      total_steps = NUM_EPOCHS * len(train_loader) // GRAD_ACCUM_STEPS
-      scheduler = torch.optim.lr_scheduler.OneCycleLR(
-          optimizer, max_lr=LEARNING_RATE * 10, total_steps=total_steps,
-          pct_start=0.3, anneal_strategy='cos'
-      )
+      scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
       criterion = nn.MSELoss()
-      # Huber loss for robustness to outliers
-      huber_loss = nn.SmoothL1Loss(beta=1.0)
 
       best_val_loss = float("inf")
       best_mape = float("inf")
-      patience_counter = 0
-      global_step = 0
 
       for epoch in range(NUM_EPOCHS):
           sampler.set_epoch(epoch)
           model.train()
           train_loss = 0.0
-          optimizer.zero_grad()
           
-          for batch_idx, (X, y) in enumerate(train_loader):
+          for X, y in train_loader:
               X, y = X.to(device), y.to(device)
+              optimizer.zero_grad()
               output = model(X)
-              # Combined MSE + Huber for stability
-              loss = 0.7 * criterion(output, y) + 0.3 * huber_loss(output, y)
-              loss = loss / GRAD_ACCUM_STEPS  # Normalize for accumulation
+              loss = criterion(output, y)
               loss.backward()
-              
-              if (batch_idx + 1) % GRAD_ACCUM_STEPS == 0:
-                  torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                  optimizer.step()
-                  scheduler.step()
-                  optimizer.zero_grad()
-                  global_step += 1
-              
-              train_loss += loss.item() * GRAD_ACCUM_STEPS
+              torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+              optimizer.step()
+              train_loss += loss.item()
           
           train_loss /= len(train_loader)
           
@@ -377,7 +298,7 @@ spec:
                   actuals.extend(y.numpy())
           
           val_loss /= len(val_loader)
-          # OneCycleLR steps per batch, not per epoch
+          scheduler.step(val_loss)
           
           if rank == 0:
               predictions = np.array(predictions)
@@ -410,20 +331,8 @@ spec:
                   best_mape = mape
                   torch.save(model.module.state_dict(), f"{OUTPUT_DIR}/best_model.pt")
                   logger.info("  → Saved best model")
-                  patience_counter = 0
-              else:
-                  patience_counter += 1
-                  if patience_counter >= EARLY_STOP_PATIENCE:
-                      logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {EARLY_STOP_PATIENCE} epochs)")
-                      break
           
           dist.barrier()
-          
-          # Broadcast early stop signal to all ranks
-          early_stop_tensor = torch.tensor([patience_counter >= EARLY_STOP_PATIENCE if rank == 0 else 0], dtype=torch.int, device=device)
-          dist.broadcast(early_stop_tensor, src=0)
-          if early_stop_tensor.item():
-              break
 
       # =================================================================
       # FINAL LOGGING TO MLFLOW + MODEL REGISTRY

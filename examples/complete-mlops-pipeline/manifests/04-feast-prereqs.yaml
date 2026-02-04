@@ -1,0 +1,73 @@
+# Prerequisites for Feast RayJob submissions
+# Apply this before running RayJobs
+---
+# Shared PVC for Feast data and models
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: feast-pvc
+  namespace: feast-mlops-demo
+spec:
+  accessModes:
+    - ReadWriteMany  # RWX for shared access across Ray workers
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs-csi
+
+---
+# Service Account for RayJob submissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: feast-sa
+  namespace: feast-mlops-demo
+
+---
+# Role for RayJob to access Ray cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: feast-rayjob-role
+  namespace: feast-mlops-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+# RoleBinding for feast-sa
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: feast-rayjob-rolebinding
+  namespace: feast-mlops-demo
+subjects:
+  - kind: ServiceAccount
+    name: feast-sa
+    namespace: feast-mlops-demo
+roleRef:
+  kind: Role
+  name: feast-rayjob-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# RoleBinding for TrainJob (default SA) to access Ray resources
+# Required when training job needs to connect to KubeRay cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trainjob-ray-access
+  namespace: feast-mlops-demo
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: feast-mlops-demo
+roleRef:
+  kind: Role
+  name: feast-rayjob-role
+  apiGroup: rbac.authorization.k8s.io
+

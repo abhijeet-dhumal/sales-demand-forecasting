@@ -1,14 +1,17 @@
-# MLOps Pipeline with Feast, Ray, Kubeflow & MLflow on OpenShift AI
+# Complete MLOps Pipeline on OpenShift AI
+
+**Feast + KubeRay + Kubeflow Training + MLflow + Model Registry**
 
 This example demonstrates a **production-grade MLOps pipeline** integrating key OpenShift AI components:
 
 - **Feast** - Feature Store for feature management
 - **Ray/KubeRay** - Distributed data processing
 - **Kubeflow Training** - Distributed model training
-- **MLflow** - Experiment tracking & model registry
+- **MLflow** - Experiment tracking, model logging & artifacts
+- **Model Registry** - Versioned model storage for KServe deployment
 
 > [!TIP]
-> **One Pipeline, Four Integrations**: This quickstart shows how Feast, Ray, Kubeflow Training, and MLflow work together seamlessly on OpenShift AI.
+> **One Pipeline, Five Integrations**: This quickstart shows how Feast, Ray, Kubeflow Training, MLflow, and Model Registry work together seamlessly on OpenShift AI.
 
 > [!IMPORTANT]
 > This example has been tested with OpenShift AI 3,2+ on configurations listed in the [validation](#validation) section.
@@ -38,10 +41,22 @@ This example demonstrates a **production-grade MLOps pipeline** integrating key 
 │   │    Feast    │────────▶│   PostgreSQL    │◀─────│   MLflow    │          │
 │   │Feature Store│         │ - Feast Registry│      │  Tracking   │          │
 │   └─────────────┘         │ - Online Store  │      │  Server     │          │
-│          │                │ - MLflow Backend│      └─────────────┘          │
+│          │                │ - MLflow Backend│      └──────┬──────┘          │
+│          │                │ - Model Registry│             │                 │
 │          │                └─────────────────┘             │                 │
-│          │                                                │                 │
-│          ▼                                                ▼                 │
+│          │                        ▲                       │                 │
+│          │                        │                       │                 │
+│          │                ┌───────┴───────┐               │                 │
+│          │                │Model Registry │◀──────────────┘                 │
+│          │                │  (OpenShift)  │                                 │
+│          │                └───────────────┘                                 │
+│          │                        │                                         │
+│          │                        ▼                                         │
+│          │                ┌───────────────┐                                 │
+│          │                │    KServe     │                                 │
+│          │                │ (Deployment)  │                                 │
+│          │                └───────────────┘                                 │
+│          ▼                                                                  │
 │   ┌─────────────────────────────────────────────────────────────────┐       │
 │   │                    Kubeflow Training Operator                   │       │
 │   │  ┌─────────────────────────────────────────────────────────┐    │       │
@@ -74,7 +89,7 @@ This example demonstrates a **production-grade MLOps pipeline** integrating key 
 ```bash
 # Clone repository
 git clone https://github.com/<your-org>/sales-demand-forecasting.git
-cd sales-demand-forecasting/examples/feast-ray-mlops
+cd sales-demand-forecasting/examples/complete-mlops-pipeline
 
 # Run setup script
 ./scripts/setup.sh
@@ -87,7 +102,7 @@ kubectl wait --for=condition=ready pod --all -n feast-mlops-demo --timeout=300s
 
 1. **Create Project** in OpenShift AI Dashboard → Data Science Projects
 2. **Create Workbench** with PyTorch image, Medium size, RWX storage (50Gi)
-3. **Clone this repo** and navigate to `examples/feast-ray-mlops/notebooks/`
+3. **Clone this repo** and navigate to `examples/complete-mlops-pipeline/notebooks/`
 4. **Run notebooks** in order: `01-feast-features` → `02-training` → `03-inference`
 
 ## Pipeline Notebooks
@@ -185,52 +200,76 @@ with mlflow.start_run():
 
 This example has been validated with:
 
-### Sales Forecasting - 2 Ray Workers - CPU
+### Sales Forecasting - 4x NVIDIA GPU - Production Pattern
 
 * **Infrastructure:**
   * OpenShift AI 2.19
-  * 2x Ray workers (4 CPU each)
+  * 4x NVIDIA GPU (A100/H100)
+  * 2x Ray workers
   * NFS-CSI storage class
   
 * **Configuration:**
   ```yaml
-  feast:
-    offline_store: ray
-    online_store: postgres
-  ray:
-    workers: 2
-    cpus_per_worker: 4
-  training:
-    epochs: 50
-    batch_size: 256
+  # Data
+  dataset: Synthetic sales data (93,600 rows)
+  features: 10 (lag features, rolling stats, store attributes)
+  
+  # Feature Engineering (Feast + KubeRay)
+  offline_store: ray
+  online_store: postgres
+  compute_engine: KubeRay (2 workers)
+  
+  # Model
+  architecture: MLP (256 → 128 → 64 → 1)
+  dropout: 0.2
+  batch_norm: true
+  
+  # Training
+  epochs: 15
+  batch_size: 256
+  learning_rate: 1e-3
+  optimizer: AdamW
+  distributed: PyTorch DDP (4 GPUs)
   ```
 
 * **Results:**
-  * Data generation: ~5 seconds
-  * Feature registration: ~10 seconds
-  * Historical retrieval (5000 rows): ~45 seconds
-  * Training (50 epochs): ~2 minutes
-  * Model RMSE: ~$1,500
+  ```
+  ✅ Best MAPE: 2.3%
+  ✅ Best RMSE: 500
+  ✅ Best val_loss: 0.0009
+  ```
+
+* **Timing Breakdown:**
+  | Component | Duration |
+  |-----------|----------|
+  | Dataprep (Feast + KubeRay) | ~2 min 15s |
+  | Training (15 epochs, 4 GPU) | ~44s |
+  | **Total Pipeline** | **~3 min** |
+
+* **Metrics:**
+  ![](./docs/mlflow-metrics.png)
 
 ## Directory Structure
 
 ```
-feast-ray-mlops/
-├── README.md                     # This file
-├── docs/                         # Screenshots and diagrams
+complete-mlops-pipeline/
+├── README.md                      # This file
+├── docs/                          # Screenshots and diagrams
 ├── notebooks/
-│   ├── 01-feast-features.ipynb  # Setup + Feature engineering (Feast + Ray)
-│   ├── 02-training.ipynb        # Model training (Kubeflow + MLflow)
-│   └── 03-inference.ipynb       # Online inference (Feast + Model)
+│   ├── 01-feast-features.ipynb   # Setup + Feature engineering (Feast + Ray)
+│   ├── 02-training.ipynb         # Model training (Kubeflow SDK + MLflow)
+│   └── 03-inference.ipynb        # Online inference (Feast + Model)
 ├── manifests/
-│   ├── 00-prereqs.yaml          # Namespace, storage, RBAC
-│   ├── 01-postgres.yaml         # PostgreSQL (Red Hat certified)
-│   ├── 02-mlflow.yaml           # MLflow server
-│   ├── 03-kuberay.yaml          # KubeRay cluster
-│   └── 04-trainjob.yaml         # TrainJob template
+│   ├── 00-prereqs.yaml           # Namespace + ClusterTrainingRuntime
+│   ├── 01-postgres.yaml          # PostgreSQL (Red Hat certified)
+│   ├── 02-mlflow.yaml            # MLflow tracking server
+│   ├── 03-kuberay.yaml           # KubeRay cluster
+│   ├── 04-feast-prereqs.yaml     # PVC, ServiceAccount, RBAC
+│   ├── 05-dataprep-job.yaml      # Dataprep RayJob (Feast + KubeRay)
+│   └── 06-trainjob.yaml          # TrainJob with MLflow
 └── scripts/
-    ├── setup.sh                 # Automated setup
-    └── cleanup.sh               # Resource cleanup
+    ├── setup.sh                  # Automated setup (runs all manifests)
+    └── cleanup.sh                # Resource cleanup
 ```
 
 ## Troubleshooting
