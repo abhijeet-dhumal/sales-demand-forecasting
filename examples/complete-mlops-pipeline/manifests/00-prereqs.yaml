@@ -4,13 +4,15 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: feast-mlops-demo
+  name: feast-trainer-demo
   labels:
     app.kubernetes.io/name: feast-mlops
 
 ---
 # ClusterTrainingRuntime with shared storage
 # This is cluster-scoped, apply with cluster-admin
+# NOTE: The notebooks use the built-in "torch-distributed" runtime
+# This custom runtime is optional - only needed if you want pre-configured PVC mounts
 apiVersion: trainer.kubeflow.org/v1alpha1
 kind: ClusterTrainingRuntime
 metadata:
@@ -40,7 +42,14 @@ spec:
                     claimName: feast-pvc
                 containers:
                 - name: node
-                  image: registry.redhat.io/rhoai/odh-training-cuda128-torch28-py312-rhel9@sha256:bdc8cb781f005c11534a959fd57b8ba5133522e3bb4756d409e3111eeaf2e8ee
+                  image: quay.io/modh/training:py311-cuda124-torch251
+                  resources:
+                    requests:
+                      cpu: "4"
+                      memory: "8Gi"
+                    limits:
+                      cpu: "8"
+                      memory: "16Gi"
                   volumeMounts:
                   - name: shared-storage
                     mountPath: /shared

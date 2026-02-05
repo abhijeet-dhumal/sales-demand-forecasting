@@ -5,7 +5,7 @@ apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
   name: feast-ray
-  namespace: feast-mlops-demo
+  namespace: feast-trainer-demo
   labels:
     app: feast-ray
     ray.io/cluster: feast-ray
@@ -13,7 +13,7 @@ metadata:
     # Disable ODH TLS for internal cluster communication
     odh.ray.io/secure-trusted-network: "false"
 spec:
-  rayVersion: '2.52.1'
+  rayVersion: '2.35.0'
   # Autoscaling disabled for Kueue compatibility
   enableInTreeAutoscaling: false
   
@@ -34,7 +34,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: quay.io/modh/ray:2.52.1-py312-cu128
+          image: quay.io/modh/ray:2.35.0-py311-cu121
           ports:
           - containerPort: 6379
             name: gcs
@@ -89,7 +89,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: quay.io/modh/ray:2.52.1-py312-cu128
+          image: quay.io/modh/ray:2.35.0-py311-cu121
           resources:
             limits:
               cpu: "4"
@@ -117,7 +117,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: feast-ray-head
-  namespace: feast-mlops-demo
+  namespace: feast-trainer-demo
   labels:
     app: feast-ray
     ray.io/cluster: feast-ray
@@ -145,7 +145,7 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: feast-ray-dashboard
-  namespace: feast-mlops-demo
+  namespace: feast-trainer-demo
 spec:
   to:
     kind: Service

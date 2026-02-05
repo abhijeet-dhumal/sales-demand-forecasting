@@ -8,7 +8,7 @@ apiVersion: trainer.kubeflow.org/v1alpha1
 kind: TrainJob
 metadata:
   name: sales-forecasting-mlflow
-  namespace: feast-mlops-demo
+  namespace: feast-trainer-demo
   labels:
     app.kubernetes.io/name: sales-forecasting-mlflow
 spec:
@@ -34,14 +34,14 @@ spec:
       value: "15"
     # MLflow configuration
     - name: MLFLOW_TRACKING_URI
-      value: "http://mlflow.feast-mlops-demo.svc.cluster.local:5000"
+      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
     - name: MLFLOW_EXPERIMENT_NAME
       value: "sales-forecasting"
     - name: MLFLOW_ARTIFACT_ROOT
       value: "/shared/mlflow-artifacts"
     # Model Registry configuration
     - name: MODEL_REGISTRY_URI
-      value: "sales-model-registry.feast-mlops-demo.svc.cluster.local:8080"
+      value: "sales-model-registry.feast-trainer-demo.svc.cluster.local:8080"
     # Note: Using pre-computed training data from dataprep job
     # This is the recommended production pattern:
     # - Dataprep creates training datasets (via Feast + KubeRay)
