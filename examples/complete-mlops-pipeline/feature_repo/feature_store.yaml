@@ -1,0 +1,62 @@
+# Feast Feature Store Configuration - Production Setup
+# PostgreSQL for durable storage + Ray for distributed compute
+#
+# NAMESPACE: feast-trainer-demo (must match manifests/01-postgres.yaml)
+
+project: sales_demand_forecasting
+
+# PostgreSQL registry for feature definitions and metadata
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://feast:feast123@feast-postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+  cache_ttl_seconds: 60
+  sqlalchemy_config_kwargs:
+    pool_pre_ping: true
+    pool_size: 10
+    max_overflow: 20
+
+provider: local
+
+# PostgreSQL offline store for data I/O and persistence
+offline_store:
+  type: postgres
+  host: feast-postgres.feast-trainer-demo.svc.cluster.local
+  port: 5432
+  database: feast
+  db_schema: public
+  user: feast
+  password: feast123
+  sslmode: prefer
+
+# Ray compute engine for distributed feature processing
+# Connects to dedicated RayCluster (feast-ray) for distributed jobs
+batch_engine:
+  type: ray.engine
+  ray_address: "ray://feast-ray-head.feast-trainer-demo.svc.cluster.local:10001"
+  max_workers: 4
+  max_parallelism_multiplier: 2
+  enable_optimization: true
+  broadcast_join_threshold_mb: 100
+  target_partition_size_mb: 64
+  window_size_for_joins: "1H"
+  enable_distributed_joins: true
+  enable_ray_logging: true
+
+# PostgreSQL online store for low-latency serving
+online_store:
+  type: postgres
+  host: feast-postgres.feast-trainer-demo.svc.cluster.local
+  port: 5432
+  database: feast
+  db_schema: public
+  user: feast
+  password: feast123
+  sslmode: prefer
+
+entity_key_serialization_version: 3
+
+# ARCHITECTURE:
+# - PostgreSQL Registry: Feature definitions (SQL-queryable, transactional)
+# - PostgreSQL Offline: Raw feature storage (durable, ACID compliant)
+# - Ray Compute Engine: Dedicated RayCluster (feast-ray) for distributed jobs
+# - PostgreSQL Online: Real-time serving (low-latency access)
