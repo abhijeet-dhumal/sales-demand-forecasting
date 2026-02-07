@@ -23,35 +23,38 @@ spec:
     spec:
       initContainers:
       - name: install-deps
-        image: ghcr.io/mlflow/mlflow:v2.10.0
+        image: ghcr.io/mlflow/mlflow:v3.9.0
         command: ["pip", "install", "--target=/deps", "psycopg2-binary"]
         volumeMounts:
         - name: deps
           mountPath: /deps
       containers:
       - name: mlflow
-        image: ghcr.io/mlflow/mlflow:v2.10.0
+        image: ghcr.io/mlflow/mlflow:v3.9.0
         ports:
         - containerPort: 5000
           name: http
         command:
-        - mlflow
-        - server
-        - --host=0.0.0.0
-        - --port=5000
-        - --backend-store-uri=postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@feast-postgres:5432/feast
-        - --default-artifact-root=/shared/mlflow-artifacts
-        - --serve-artifacts
+        - /bin/bash
+        - -c
+        - |
+          mlflow server \
+            --host=0.0.0.0 \
+            --port=5000 \
+            --backend-store-uri="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/feast" \
+            --default-artifact-root=/shared/mlflow-artifacts \
+            --serve-artifacts \
+            --allowed-hosts "*"
         env:
         - name: POSTGRES_USER
           valueFrom:
             secretKeyRef:
-              name: feast-postgres-secret
+              name: postgres-secret
               key: username
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: feast-postgres-secret
+              name: postgres-secret
               key: password
         - name: MLFLOW_TRACKING_URI
           value: "http://localhost:5000"

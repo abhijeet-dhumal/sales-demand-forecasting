@@ -41,7 +41,7 @@ sleep 3
 echo "Step 2/6: Deploying PostgreSQL..."
 kubectl apply -f "${MANIFESTS_DIR}/01-postgres.yaml"
 echo "   Waiting for PostgreSQL to be ready..."
-kubectl wait --for=condition=available deployment/feast-postgres -n ${NAMESPACE} --timeout=180s
+kubectl wait --for=condition=available deployment/postgres -n ${NAMESPACE} --timeout=180s
 
 echo "Step 3/6: Deploying MLflow..."
 kubectl apply -f "${MANIFESTS_DIR}/02-mlflow.yaml"
@@ -50,7 +50,7 @@ sleep 10
 kubectl wait --for=condition=available deployment/mlflow -n ${NAMESPACE} --timeout=180s || true
 
 echo "Step 4/6: Deploying KubeRay cluster..."
-kubectl apply -f "${MANIFESTS_DIR}/03-kuberay.yaml"
+kubectl apply -f "${MANIFESTS_DIR}/03-raycluster.yaml"
 echo "   Waiting for Ray cluster to be ready..."
 kubectl wait --for=condition=ready pod -l ray.io/cluster=feast-ray,ray.io/node-type=head -n ${NAMESPACE} --timeout=300s
 

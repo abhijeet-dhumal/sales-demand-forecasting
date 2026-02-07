@@ -1,0 +1,101 @@
+# Feast Feature Server - REST API for Feature Serving
+# Provides dedicated endpoint for get_online_features
+# https://docs.feast.dev/reference/feature-servers/python-feature-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feast-server
+  template:
+    metadata:
+      labels:
+        app: feast-server
+    spec:
+      containers:
+      - name: feast-server
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "Installing Feast..."
+          pip install --target=/tmp/pylibs -q feast[postgres]==0.59.0 psycopg2-binary uvicorn
+          export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
+          export PATH=/tmp/pylibs/bin:$PATH
+          
+          echo "Starting Feast Feature Server..."
+          cd /shared/feature_repo
+          feast serve -h 0.0.0.0 -p 6566 --no-access-log
+        ports:
+        - containerPort: 6566
+          name: http
+        env:
+        - name: FEATURE_STORE_YAML_BASE64
+          value: ""  # Uses /shared/feature_repo/feature_store.yaml
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1
+            memory: 2Gi
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /shared
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 6566
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 6566
+          initialDelaySeconds: 90
+          periodSeconds: 30
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: feast-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-server
+spec:
+  selector:
+    app: feast-server
+  ports:
+  - name: http
+    port: 6566
+    targetPort: 6566
+  type: ClusterIP
+---
+# Route for external access to Feature Server
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feast-server
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: feast-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+

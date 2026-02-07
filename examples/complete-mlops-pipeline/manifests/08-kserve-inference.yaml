@@ -1,5 +1,11 @@
 # KServe Inference for Sales Forecasting Model
-# Deploys the trained PyTorch model as a REST API endpoint
+# 
+# Production-grade inference with:
+# 1. Feast Feature Server for online feature retrieval (REST API)
+# 2. On-Demand feature transformations (computed at request time)
+# 3. PyTorch model inference
+#
+# Flow: Entity IDs → Feast Feature Server → Features → Model → Prediction
 ---
 # ConfigMap with the serving script
 apiVersion: v1
@@ -12,8 +18,23 @@ metadata:
 data:
   serve.py: |
     #!/usr/bin/env python3
-    """Sales forecasting inference server - loads model architecture from metadata"""
-    import os, json, torch, torch.nn as nn, joblib, numpy as np
+    """
+    Sales Forecasting Inference Server
+    
+    Production Pattern:
+    1. Receives entity keys (store_id, dept_id)
+    2. Calls Feast Feature Server REST API for online features
+    3. On-Demand features computed by Feast automatically
+    4. Runs model inference
+    5. Returns prediction
+    """
+    import os
+    import json
+    import requests
+    import torch
+    import torch.nn as nn
+    import joblib
+    import numpy as np
     from flask import Flask, request, jsonify
     import logging
 
@@ -23,11 +44,13 @@ data:
     app = Flask(__name__)
     model, scalers, feature_cols, metadata = None, None, None, None
 
+    # Feast Feature Server URL
+    FEAST_SERVER_URL = os.getenv("FEAST_SERVER_URL", "http://feast-server.feast-trainer-demo.svc.cluster.local:6566")
+
     # =====================================================
-    # MODEL DEFINITION (must match training notebook)
+    # MODEL DEFINITION (matches training)
     # =====================================================
     class SalesMLP(nn.Module):
-        """Simple MLP matching the training notebook architecture"""
         def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.2):
             super().__init__()
             layers = []
@@ -71,36 +94,155 @@ data:
 
         logger.info(f"Model loaded: {len(feature_cols)} features, arch={hidden_dims}")
         logger.info(f"Best MAPE: {metadata.get('best_mape', 'N/A')}%")
+        logger.info(f"Feast Feature Server: {FEAST_SERVER_URL}")
+
+    def get_features_from_feast(entity_rows):
+        """
+        Call Feast Feature Server REST API for online features.
+        Uses 'inference_features' Feature Service which includes On-Demand features.
+        """
+        # Feast Feature Server API expects this format
+        payload = {
+            "feature_service": "inference_features",
+            "entities": {
+                "store_id": [row["store_id"] for row in entity_rows],
+                "dept_id": [row["dept_id"] for row in entity_rows],
+            }
+        }
+        
+        try:
+            response = requests.post(
+                f"{FEAST_SERVER_URL}/get-online-features",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Parse response into feature matrix
+            features = []
+            for i in range(len(entity_rows)):
+                row = {}
+                for name, values in result.get("results", []):
+                    if name in feature_cols:
+                        row[name] = values[i] if values[i] is not None else 0
+                features.append(row)
+            
+            return features
+            
+        except requests.RequestException as e:
+            logger.error(f"Feast Feature Server error: {e}")
+            raise
 
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "healthy", "model": "sales-forecast"})
+        # Also check Feast Feature Server health
+        feast_healthy = False
+        try:
+            resp = requests.get(f"{FEAST_SERVER_URL}/health", timeout=2)
+            feast_healthy = resp.status_code == 200
+        except:
+            pass
+        
+        return jsonify({
+            "status": "healthy" if feast_healthy else "degraded",
+            "model": "sales-forecast",
+            "feast_server": "connected" if feast_healthy else "disconnected"
+        })
 
     @app.route("/v1/models/sales-forecast", methods=["GET"])
     def model_info():
         return jsonify({
             "name": "sales-forecast",
             "features": feature_cols,
+            "feature_service": "inference_features",
+            "feast_server": FEAST_SERVER_URL,
             "hidden_dims": metadata.get("hidden_dims"),
             "best_mape": metadata.get("best_mape"),
             "best_val_loss": metadata.get("best_val_loss"),
-            "device_trained": metadata.get("device_type", "unknown")
         })
 
     @app.route("/v1/models/sales-forecast:predict", methods=["POST"])
     def predict():
+        """
+        Production prediction endpoint.
+        
+        Input: {"instances": [{"store_id": 1, "dept_id": 3}, ...]}
+        Output: {"predictions": [48523.75, ...], "features_used": [...]}
+        
+        Features are fetched from Feast Feature Server (including On-Demand features).
+        """
         try:
             data = request.json
-
-            # Support both formats:
-            # {"instances": [[f1, f2, ...]]} - array format
-            # {"instances": [{"lag_1": 1.0, ...}]} - dict format
             instances = data.get("instances", [])
+            
+            if not instances:
+                return jsonify({"error": "No instances provided"}), 400
+            
+            # Check if full features provided or just entity keys
+            first = instances[0]
+            
+            if "store_id" in first and "dept_id" in first and len(first) <= 2:
+                # Entity keys only - fetch features from Feast
+                logger.info(f"Fetching features from Feast for {len(instances)} entities")
+                feature_rows = get_features_from_feast(instances)
+                
+                X = np.array([
+                    [row.get(c, 0) for c in feature_cols]
+                    for row in feature_rows
+                ])
+                
+                features_source = "feast_feature_server"
+            else:
+                # Full features provided directly
+                X = np.array([
+                    [inst.get(c, 0) if isinstance(inst, dict) else inst[i]
+                     for i, c in enumerate(feature_cols)]
+                    for inst in instances
+                ])
+                features_source = "request_payload"
 
+            # Scale and predict
+            X_scaled = scalers["scaler_X"].transform(X)
+
+            with torch.no_grad():
+                preds = model(torch.FloatTensor(X_scaled)).numpy()
+
+            predictions = scalers["scaler_y"].inverse_transform(preds.reshape(-1, 1)).flatten()
+
+            return jsonify({
+                "predictions": predictions.tolist(),
+                "features_source": features_source,
+                "feature_service": "inference_features" if features_source == "feast_feature_server" else None,
+            })
+
+        except Exception as e:
+            logger.error(f"Prediction error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/v1/models/sales-forecast:predict-with-feast", methods=["POST"])
+    def predict_with_feast():
+        """
+        Explicit Feast-based prediction (always uses Feature Server).
+        
+        Input: {"entities": [{"store_id": 1, "dept_id": 3}]}
+        Output: {"predictions": [...], "features": {...}}
+        """
+        try:
+            data = request.json
+            entities = data.get("entities", [])
+            
+            if not entities:
+                return jsonify({"error": "No entities provided"}), 400
+            
+            # Fetch from Feast Feature Server
+            logger.info(f"Fetching features from Feast for {len(entities)} entities")
+            feature_rows = get_features_from_feast(entities)
+            
             X = np.array([
-                [inst.get(c, 0) if isinstance(inst, dict) else inst[i]
-                 for i, c in enumerate(feature_cols)]
-                for inst in instances
+                [row.get(c, 0) for c in feature_cols]
+                for row in feature_rows
             ])
 
             X_scaled = scalers["scaler_X"].transform(X)
@@ -110,7 +252,13 @@ data:
 
             predictions = scalers["scaler_y"].inverse_transform(preds.reshape(-1, 1)).flatten()
 
-            return jsonify({"predictions": predictions.tolist()})
+            return jsonify({
+                "predictions": predictions.tolist(),
+                "entities": entities,
+                "features_retrieved": feature_rows,
+                "feature_service": "inference_features",
+                "feast_server": FEAST_SERVER_URL,
+            })
 
         except Exception as e:
             logger.error(f"Prediction error: {e}")

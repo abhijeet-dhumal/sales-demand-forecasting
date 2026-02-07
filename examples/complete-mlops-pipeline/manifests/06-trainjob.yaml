@@ -1,9 +1,16 @@
-# Training Job with Full MLflow Integration + Model Registry
-# Features:
-# - MLflow experiment tracking (metrics, params)
-# - MLflow model logging (PyTorch model with signature)
-# - MLflow artifact storage (scalers, feature lists)
-# - OpenShift AI Model Registry integration
+# Training Job with Feast + Ray Integration + MLflow
+# 
+# This TrainJob demonstrates FULL Feast integration:
+# 1. Calls get_historical_features() directly (not pre-computed)
+# 2. Uses KubeRay cluster via CodeFlare SDK for distributed PIT joins
+# 3. Trains PyTorch model with DDP
+# 4. Logs to MLflow with model registry
+#
+# Architecture:
+# - Feast Feature Service: "training_features" (ensures consistency)
+# - Ray Compute Engine: KubeRay cluster (distributed processing)
+# - MLflow: Experiment tracking + Model Registry
+#
 apiVersion: trainer.kubeflow.org/v1alpha1
 kind: TrainJob
 metadata:
@@ -25,13 +32,15 @@ spec:
         cpu: "8"
         memory: "16Gi"
     env:
-    # Data paths (shared with dataprep job)
+    # Data paths
     - name: DATA_PATH
       value: /shared/data
     - name: OUTPUT_DIR
       value: /shared/models
+    - name: FEATURE_REPO
+      value: /shared/feature_repo
     - name: NUM_EPOCHS
-      value: "15"
+      value: "30"
     # MLflow configuration
     - name: MLFLOW_TRACKING_URI
       value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
@@ -42,21 +51,43 @@ spec:
     # Model Registry configuration
     - name: MODEL_REGISTRY_URI
       value: "sales-model-registry.feast-trainer-demo.svc.cluster.local:8080"
-    # Note: Using pre-computed training data from dataprep job
-    # This is the recommended production pattern:
-    # - Dataprep creates training datasets (via Feast + KubeRay)
-    # - Training consumes prepared data directly (faster, reproducible)
+    # KubeRay/CodeFlare SDK configuration (same as dataprep job)
+    - name: FEAST_RAY_USE_KUBERAY
+      value: "true"
+    - name: FEAST_RAY_CLUSTER_NAME
+      value: "feast-ray"
+    - name: FEAST_RAY_NAMESPACE
+      value: "feast-trainer-demo"
+    - name: FEAST_RAY_SKIP_TLS
+      value: "true"
     command:
     - bash
     - -c
     - |
       set -e
-      echo "Installing dependencies..."
-      # Pin MLflow to match server version to avoid API compatibility issues
-      pip install --quiet scikit-learn joblib "mlflow==2.10.0" pyarrow "model-registry==0.3.5"
+      echo "============================================================"
+      echo "🚀 TRAINING WITH FEAST + RAY INTEGRATION"
+      echo "============================================================"
+      
+      # Install dependencies (Feast + Ray + CodeFlare + MLflow)
+      # Use mlflow 3.x to match server (supports logged-models API)
+      echo "📦 Installing dependencies..."
+      pip install --quiet --target=/tmp/pylibs \
+        "feast[postgres,ray]==0.59.0" codeflare-sdk psycopg2-binary \
+        scikit-learn joblib pyarrow "mlflow>=3.0"
+      
+      export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
+      export PATH=/tmp/pylibs/bin:$PATH
+      
+      # Setup in-cluster auth for CodeFlare SDK
+      export FEAST_RAY_AUTH_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+      export FEAST_RAY_AUTH_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+      echo "🔐 CodeFlare SDK auth configured"
 
       cat > /tmp/train_mlflow.py << 'TRAIN_SCRIPT'
       import os
+      import sys
+      import json
       import logging
       import numpy as np
       import pandas as pd
@@ -68,7 +99,8 @@ spec:
       from sklearn.preprocessing import StandardScaler
       import joblib
       import mlflow
-      from datetime import datetime
+      from datetime import datetime, timezone, timedelta
+      import time
 
       logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
       logger = logging.getLogger(__name__)
@@ -76,6 +108,7 @@ spec:
       # Configuration
       DATA_PATH = os.environ.get("DATA_PATH", "/shared/data")
       OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/shared/models")
+      FEATURE_REPO = os.environ.get("FEATURE_REPO", "/shared/feature_repo")
       NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 15))
       MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
       MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "sales-forecasting")
@@ -141,28 +174,116 @@ spec:
           })
 
       # =================================================================
-      # LOAD PRE-COMPUTED TRAINING DATA
+      # FEAST: GET HISTORICAL FEATURES (via KubeRay)
       # =================================================================
-      # Production pattern: Dataprep job (via Feast + KubeRay) creates training data
-      # Training job consumes prepared data directly - faster & reproducible
+      # This calls Feast directly - Ray handles distributed PIT joins!
       if rank == 0:
           os.makedirs(OUTPUT_DIR, exist_ok=True)
           
           logger.info("=" * 60)
-          logger.info("LOADING PRE-COMPUTED TRAINING DATA")
+          logger.info("FEAST: GET_HISTORICAL_FEATURES (KubeRay Distributed)")
           logger.info("=" * 60)
-          logger.info("Note: Data was prepared by dataprep job using Feast + KubeRay")
           
-          # Load pre-computed features from dataprep job
-          logger.info(f"Loading data from {DATA_PATH}...")
-          training_df = pd.read_parquet(f"{DATA_PATH}/features.parquet")
-          training_df["date"] = pd.to_datetime(training_df["date"])
+          from feast import FeatureStore
           
-          logger.info(f"Loaded {len(training_df):,} rows, {len(training_df.columns)} columns")
-          logger.info(f"Columns: {list(training_df.columns)}")
+          # Initialize Feast with Ray-enabled config (connects to KubeRay via CodeFlare SDK)
+          # Use feature_store_ray.yaml which has Ray offline store configured
+          ray_config_path = f"{FEATURE_REPO}/feature_store_ray.yaml"
+          logger.info(f"Initializing Feast with Ray config: {ray_config_path}")
+          
+          # Copy Ray config to feature_store.yaml for FeatureStore to pick up
+          import shutil
+          shutil.copy(ray_config_path, f"{FEATURE_REPO}/feature_store.yaml")
+          
+          store = FeatureStore(repo_path=FEATURE_REPO)
+          
+          # Create entity DataFrame for training
+          logger.info("Creating entity DataFrame...")
+          entity_rows = []
+          base_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+          
+          # 104 weeks (2 years) x 10 stores x 5 departments = 5,200 rows
+          # More data for better model generalization
+          NUM_WEEKS = 104
+          NUM_STORES = 10
+          NUM_DEPTS = 5
+          
+          for week in range(NUM_WEEKS):
+              event_ts = base_date + timedelta(weeks=week)
+              for store_id in range(1, NUM_STORES + 1):
+                  for dept_id in range(1, NUM_DEPTS + 1):
+                      entity_rows.append({
+                          "store_id": store_id,
+                          "dept_id": dept_id,
+                          "event_timestamp": event_ts
+                      })
+          
+          entity_df = pd.DataFrame(entity_rows)
+          logger.info(f"Entity DataFrame: {len(entity_df):,} rows")
+          
+          # Get historical features using Feature Service (ensures train-serve consistency)
+          logger.info("Calling get_historical_features() via 'training_features' Feature Service...")
+          logger.info("Ray (KubeRay) will perform distributed point-in-time joins...")
+          
+          start_time = time.time()
+          training_data = store.get_historical_features(
+              entity_df=entity_df,
+              features=store.get_feature_service("training_features"),
+          )
+          training_df = training_data.to_df()
+          elapsed = time.time() - start_time
+          
+          logger.info(f"✅ Features retrieved in {elapsed:.2f}s ({len(entity_df)/elapsed:.0f} rows/sec)")
+          logger.info(f"   Rows: {len(training_df):,}, Columns: {len(training_df.columns)}")
+          logger.info(f"   Columns: {list(training_df.columns)}")
+          
+          # =================================================================
+          # FEAST: SAVE DATASET (for reproducibility and lineage)
+          # =================================================================
+          logger.info("Saving versioned training dataset...")
+          dataset_version = datetime.now().strftime("%Y%m%d_%H%M%S")
+          dataset_path = f"{DATA_PATH}/saved_datasets"
+          os.makedirs(dataset_path, exist_ok=True)
+          
+          # Save versioned dataset with metadata
+          dataset_file = f"{dataset_path}/training_v{dataset_version}.parquet"
+          training_df.to_parquet(dataset_file, index=False)
+          training_df.to_parquet(f"{dataset_path}/training_latest.parquet", index=False)
+          
+          # Save dataset metadata (for lineage tracking)
+          dataset_metadata = {
+              "version": dataset_version,
+              "feature_service": "training_features",
+              "entity_count": len(entity_df),
+              "row_count": len(training_df),
+              "columns": list(training_df.columns),
+              "retrieval_time_sec": round(elapsed, 2),
+              "created_at": datetime.now(timezone.utc).isoformat(),
+              "mlflow_run_id": mlflow.active_run().info.run_id,
+          }
+          with open(f"{dataset_path}/training_latest_metadata.json", "w") as f:
+              json.dump(dataset_metadata, f, indent=2)
+          
+          logger.info(f"   Saved: {dataset_file}")
+          logger.info(f"   Metadata: {dataset_path}/training_latest_metadata.json")
+          
+          # Log dataset artifact to MLflow
+          mlflow.log_artifact(f"{dataset_path}/training_latest_metadata.json", artifact_path="datasets")
+          
+          # Log Feast metadata to MLflow
+          mlflow.log_params({
+              "feature_service": "training_features",
+              "feast_retrieval_time_sec": round(elapsed, 2),
+              "feast_throughput_rows_sec": round(len(entity_df)/elapsed),
+              "data_source": "feast_get_historical_features",
+              "dataset_version": dataset_version,
+          })
+          
+          # Drop rows with missing target
+          training_df = training_df.dropna(subset=["weekly_sales"])
           
           # Temporal split (80/20 based on time)
-          training_df = training_df.sort_values("date")
+          training_df = training_df.sort_values("event_timestamp")
           split_idx = int(len(training_df) * 0.8)
           train_df = training_df.iloc[:split_idx]
           val_df = training_df.iloc[split_idx:]
@@ -174,13 +295,17 @@ spec:
               "total_rows": len(training_df),
               "train_rows": len(train_df),
               "val_rows": len(val_df),
-              "data_source": "pre-computed (Feast + KubeRay)",
           })
           
           # Feature columns (exclude identifiers and target)
+          # Include numerical features from Feast Feature Service
+          exclude_cols = ["store_id", "dept_id", "date", "event_timestamp", "weekly_sales", 
+                          "_feast_version", "_feast_feature_service", "_feast_created_at"]
           feature_cols = [c for c in training_df.columns 
-                          if c not in ["store_id", "dept_id", "date", "event_timestamp", "weekly_sales"]
+                          if c not in exclude_cols
                           and training_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+          
+          logger.info(f"Feature columns ({len(feature_cols)}): {feature_cols}")
           
           X_train = train_df[feature_cols].fillna(0).values
           y_train = train_df["weekly_sales"].values
@@ -201,8 +326,98 @@ spec:
           joblib.dump(scaler, f"{OUTPUT_DIR}/scaler.pkl")
           joblib.dump(y_scaler, f"{OUTPUT_DIR}/y_scaler.pkl")
           joblib.dump(feature_cols, f"{OUTPUT_DIR}/feature_cols.pkl")
+          # Also save combined format for serve.py compatibility
+          joblib.dump({"scaler_X": scaler, "scaler_y": y_scaler}, f"{OUTPUT_DIR}/scalers.joblib")
           
           logger.info("Data loading and preprocessing complete")
+          
+          # =================================================================
+          # ENHANCED LINEAGE: Feature Statistics & Data Quality
+          # =================================================================
+          logger.info("Logging feature statistics for lineage...")
+          
+          # Feature statistics (before scaling)
+          feature_stats = {}
+          raw_train = train_df[feature_cols].fillna(0)
+          for col in feature_cols:
+              feature_stats[col] = {
+                  "mean": float(raw_train[col].mean()),
+                  "std": float(raw_train[col].std()),
+                  "min": float(raw_train[col].min()),
+                  "max": float(raw_train[col].max()),
+                  "null_count": int(train_df[col].isnull().sum()),
+                  "unique_count": int(train_df[col].nunique()),
+              }
+          
+          # Feature stats saved to artifact only (not metrics - too cluttered)
+          # Individual feature metrics removed to keep MLflow UI clean
+          
+          # Target distribution
+          target_stats = {
+              "mean": float(train_df["weekly_sales"].mean()),
+              "std": float(train_df["weekly_sales"].std()),
+              "min": float(train_df["weekly_sales"].min()),
+              "max": float(train_df["weekly_sales"].max()),
+              "median": float(train_df["weekly_sales"].median()),
+              "p95": float(train_df["weekly_sales"].quantile(0.95)),
+          }
+          mlflow.log_params({
+              "target_mean": round(target_stats["mean"], 2),
+              "target_std": round(target_stats["std"], 2),
+              "target_min": round(target_stats["min"], 2),
+              "target_max": round(target_stats["max"], 2),
+          })
+          
+          # Data quality metrics
+          data_quality = {
+              "total_nulls": int(training_df.isnull().sum().sum()),
+              "null_percentage": round(training_df.isnull().sum().sum() / (len(training_df) * len(training_df.columns)) * 100, 2),
+              "feature_count": len(feature_cols),
+              "entity_columns": ["store_id", "dept_id"],
+              "temporal_range_days": (training_df["event_timestamp"].max() - training_df["event_timestamp"].min()).days,
+          }
+          mlflow.log_params({
+              "data_quality_nulls": data_quality["total_nulls"],
+              "data_quality_null_pct": data_quality["null_percentage"],
+              "temporal_range_days": data_quality["temporal_range_days"],
+          })
+          
+          # Save comprehensive lineage artifact
+          lineage_artifact = {
+              "feature_statistics": feature_stats,
+              "target_statistics": target_stats,
+              "data_quality": data_quality,
+              "feature_columns": feature_cols,
+              "feast_config": {
+                  "feature_service": "training_features",
+                  "offline_store": "ray",
+                  "online_store": "postgres",
+                  "registry": "postgres",
+              },
+              "ray_cluster": {
+                  "cluster_name": os.environ.get("FEAST_RAY_CLUSTER_NAME", "feast-ray"),
+                  "namespace": os.environ.get("FEAST_RAY_NAMESPACE", "feast-trainer-demo"),
+              },
+              "environment": {
+                  "python_version": sys.version,
+                  "torch_version": torch.__version__,
+                  "feast_version": "0.59.0",
+                  "mlflow_version": mlflow.__version__,
+              },
+              "training_config": {
+                  "train_split": 0.8,
+                  "val_split": 0.2,
+                  "scaling": "StandardScaler",
+              },
+          }
+          
+          lineage_path = f"{OUTPUT_DIR}/lineage_metadata.json"
+          with open(lineage_path, "w") as f:
+              json.dump(lineage_artifact, f, indent=2, default=str)
+          mlflow.log_artifact(lineage_path, artifact_path="lineage")
+          
+          logger.info(f"   Logged {len(feature_cols)} feature statistics")
+          logger.info(f"   Data quality: {data_quality['null_percentage']}% nulls")
           
           # Save for other ranks
           np.save(f"{OUTPUT_DIR}/.X_train.npy", X_train)
@@ -235,12 +450,12 @@ spec:
       logger.info("TRAINING MODEL")
       logger.info("=" * 60)
 
-      # Hyperparameters
-      BATCH_SIZE = 256
-      LEARNING_RATE = 1e-3
-      WEIGHT_DECAY = 1e-4
-      HIDDEN_DIMS = [256, 128, 64]
-      DROPOUT = 0.2
+      # Hyperparameters (tuned for better performance)
+      BATCH_SIZE = 64  # Smaller batches = more gradient updates
+      LEARNING_RATE = 5e-4  # Lower LR for stability
+      WEIGHT_DECAY = 1e-3  # Stronger regularization
+      HIDDEN_DIMS = [512, 256, 128, 64]  # Deeper network
+      DROPOUT = 0.3  # More dropout to prevent overfitting
 
       if rank == 0:
           mlflow.log_params({
@@ -308,20 +523,20 @@ spec:
               y_scaler = joblib.load(f"{OUTPUT_DIR}/y_scaler.pkl")
               preds_orig = y_scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
               
-              # Calculate MAPE
+              # Calculate metrics
               mask = np.abs(y_val_orig) > 1000
               mape = np.mean(np.abs((y_val_orig[mask] - preds_orig[mask]) / y_val_orig[mask])) * 100 if mask.sum() > 0 else np.nan
               rmse = np.sqrt(np.mean((y_val_orig - preds_orig) ** 2))
               mae = np.mean(np.abs(y_val_orig - preds_orig))
               
-              # Log metrics to MLflow
+              # Log metrics to MLflow (essential + useful)
               mlflow.log_metrics({
                   "train_loss": train_loss,
                   "val_loss": val_loss,
-                  "mape": mape,
-                  "rmse": rmse,
-                  "mae": mae,
-                  "learning_rate": optimizer.param_groups[0]['lr']
+                  "mape": mape,  # % error (business metric)
+                  "rmse": rmse,  # penalizes large errors
+                  "mae": mae,    # avg error in $ (interpretable)
+                  "learning_rate": optimizer.param_groups[0]['lr'],  # tracks LR schedule
               }, step=epoch)
               
               logger.info(f"Epoch {epoch+1}/{NUM_EPOCHS} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | MAPE: {mape:.1f}% | RMSE: {rmse:.0f}")
@@ -333,6 +548,51 @@ spec:
                   logger.info("  → Saved best model")
           
           dist.barrier()
+
+      # =================================================================
+      # PREDICTION SAMPLES (for validation visualization)
+      # =================================================================
+      if rank == 0:
+          logger.info("Generating prediction samples for lineage...")
+          best_model_eval = SalesMLP(input_dim, HIDDEN_DIMS, DROPOUT)
+          best_model_eval.load_state_dict(torch.load(f"{OUTPUT_DIR}/best_model.pt"))
+          best_model_eval.eval()
+          
+          with torch.no_grad():
+              val_preds = best_model_eval(torch.FloatTensor(X_val)).numpy()
+          
+          y_scaler_final = joblib.load(f"{OUTPUT_DIR}/y_scaler.pkl")
+          preds_unscaled = y_scaler_final.inverse_transform(val_preds.reshape(-1, 1)).flatten()
+          
+          # Sample 20 predictions for visualization
+          sample_idx = np.random.choice(len(y_val_orig), min(20, len(y_val_orig)), replace=False)
+          prediction_samples = {
+              "samples": [
+                  {
+                      "idx": int(i),
+                      "actual": round(float(y_val_orig[i]), 2),
+                      "predicted": round(float(preds_unscaled[i]), 2),
+                      "error": round(float(preds_unscaled[i] - y_val_orig[i]), 2),
+                      "error_pct": round(abs(preds_unscaled[i] - y_val_orig[i]) / max(y_val_orig[i], 1) * 100, 1),
+                  }
+                  for i in sample_idx
+              ],
+              "summary": {
+                  "total_predictions": len(y_val_orig),
+                  "mean_actual": round(float(np.mean(y_val_orig)), 2),
+                  "mean_predicted": round(float(np.mean(preds_unscaled)), 2),
+                  "correlation": round(float(np.corrcoef(y_val_orig, preds_unscaled)[0, 1]), 4),
+              }
+          }
+          
+          pred_samples_path = f"{OUTPUT_DIR}/prediction_samples.json"
+          with open(pred_samples_path, "w") as f:
+              json.dump(prediction_samples, f, indent=2)
+          mlflow.log_artifact(pred_samples_path, artifact_path="validation")
+          
+          logger.info(f"   Correlation: {prediction_samples['summary']['correlation']:.4f}")
+      
+      dist.barrier()
 
       # =================================================================
       # FINAL LOGGING TO MLFLOW + MODEL REGISTRY
@@ -353,23 +613,24 @@ spec:
           best_model.load_state_dict(torch.load(f"{OUTPUT_DIR}/best_model.pt"))
           best_model.eval()
           
-          # Create model signature for inference
-          from mlflow.models.signature import ModelSignature
-          from mlflow.types.schema import Schema, TensorSpec
-          
-          input_schema = Schema([TensorSpec(np.dtype(np.float32), (-1, input_dim), "features")])
-          output_schema = Schema([TensorSpec(np.dtype(np.float32), (-1,), "prediction")])
-          signature = ModelSignature(inputs=input_schema, outputs=output_schema)
-          
-          # Log PyTorch model with signature
+          # Log PyTorch model (without auto-registration to avoid new API)
           logger.info("Logging PyTorch model to MLflow...")
-          mlflow.pytorch.log_model(
+          model_info = mlflow.pytorch.log_model(
               best_model,
               artifact_path="model",
-              signature=signature,
-              registered_model_name="sales-forecasting-mlp",  # Auto-register in MLflow Model Registry
               pip_requirements=["torch>=2.0", "numpy", "scikit-learn"],
           )
+          
+          # Register model using older API
+          logger.info("Registering model in MLflow Model Registry...")
+          try:
+              from mlflow.tracking import MlflowClient
+              client = MlflowClient()
+              model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
+              result = mlflow.register_model(model_uri, "sales-forecasting-mlp")
+              logger.info(f"Model registered: {result.name} v{result.version}")
+          except Exception as e:
+              logger.warning(f"Model registration skipped: {e}")
           
           # Log artifacts (scalers, feature list)
           logger.info("Logging artifacts...")
@@ -453,6 +714,9 @@ spec:
           logger.info("=" * 60)
           logger.info("✅ TRAINING COMPLETE!")
           logger.info("=" * 60)
+          logger.info(f"   Data Source: Feast get_historical_features()")
+          logger.info(f"   Feature Service: training_features")
+          logger.info(f"   Compute Engine: KubeRay (CodeFlare SDK)")
           logger.info(f"   Best val_loss: {best_val_loss:.4f}")
           logger.info(f"   Best MAPE: {best_mape:.1f}%")
           logger.info(f"   Model saved to: {OUTPUT_DIR}/best_model.pt")

@@ -30,10 +30,12 @@ resources:
   # 3. MLflow tracking server
   - 02-mlflow.yaml
   # 4. KubeRay cluster for distributed Feast processing
-  - 03-kuberay.yaml
+  - 03-raycluster.yaml
   # 5. Shared PVC and RBAC for Feast/Training
   - 04-feast-prereqs.yaml
-  # 6. (Optional) Model Registry - uncomment if using OpenShift AI Model Registry
+  # 6. Feast Feature Server (REST API for online serving)
+  - 04b-feast-server.yaml
+  # 7. (Optional) Model Registry - uncomment if using OpenShift AI Model Registry
   # - 07-model-registry.yaml
 
 # Note: The following are NOT included - handled by notebooks:

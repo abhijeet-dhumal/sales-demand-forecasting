@@ -20,7 +20,7 @@ metadata:
 spec:
   # Use existing PostgreSQL (shared with Feast)
   postgres:
-    host: feast-postgres.feast-trainer-demo.svc.cluster.local
+    host: postgres.feast-trainer-demo.svc.cluster.local
     port: 5432
     database: model_registry
     username: feast

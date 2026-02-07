@@ -14,7 +14,7 @@ INFRASTRUCTURE (kubectl apply -k manifests/)
 
     ┌─────────────────────┐       ┌─────────────────────┐       ┌─────────────────┐
     │     PostgreSQL      │       │       MLflow        │       │       PVC       │
-    │   feast-postgres    │       │       mlflow        │       │    feast-pvc    │
+    │   postgres    │       │       mlflow        │       │    feast-pvc    │
     │                     │       │                     │       │                 │
     │ • Registry (metadata)│      │ • Experiment tracking│      │ • feature_repo/ │
     │ • Offline Store     │       │ • Model artifacts   │       │ • models/       │
@@ -49,7 +49,7 @@ STEP 1: FEATURE ENGINEERING (01_feast_features.py)
     └─────────────────────────────────────────────────────────────────────────────┘
 
          from sqlalchemy import create_engine
-         engine = create_engine("postgresql://feast:feast@feast-postgres:5432/feast")
+         engine = create_engine("postgresql://feast:feast@postgres:5432/feast")
          df.to_sql("sales_features", engine, if_exists="replace", index=False)
               │
               ▼
@@ -320,11 +320,11 @@ provider: local
 
 registry:
   registry_type: sql
-  path: postgresql://feast:feast@feast-postgres:5432/feast
+  path: postgresql://feast:feast@postgres:5432/feast
 
 offline_store:
   type: postgres
-  host: feast-postgres
+  host: postgres
   port: 5432
   database: feast
   user: feast
@@ -332,7 +332,7 @@ offline_store:
 
 online_store:
   type: postgres
-  host: feast-postgres
+  host: postgres
   port: 5432
   database: feast
   user: feast

@@ -13,7 +13,7 @@ INFRASTRUCTURE (kubectl apply -k manifests/)
 
     ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
     │  PostgreSQL     │   │  RayCluster     │   │  MLflow         │
-    │  feast-postgres │   │  feast-ray      │   │  mlflow         │
+    │  postgres │   │  feast-ray      │   │  mlflow         │
     │                 │   │                 │   │                 │
     │  • Registry     │   │  • 1 head       │   │  • Tracking     │
     │  • Offline Store│   │  • 2 workers    │   │  • Artifacts    │
@@ -358,11 +358,11 @@ provider: local
 
 registry:
   registry_type: sql
-  path: postgresql://feast:feast@feast-postgres:5432/feast
+  path: postgresql://feast:feast@postgres:5432/feast
 
 offline_store:
   type: postgres
-  host: feast-postgres
+  host: postgres
   port: 5432
   database: feast
   user: feast
@@ -370,7 +370,7 @@ offline_store:
 
 online_store:
   type: postgres
-  host: feast-postgres
+  host: postgres
   port: 5432
   database: feast
   user: feast

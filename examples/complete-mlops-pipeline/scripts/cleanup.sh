@@ -36,7 +36,7 @@ kubectl delete rayjob --all -n ${NAMESPACE} --ignore-not-found=true 2>/dev/null 
 
 # Delete manifests in reverse order
 echo "Deleting KubeRay cluster..."
-kubectl delete -f "${MANIFESTS_DIR}/03-kuberay.yaml" --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f "${MANIFESTS_DIR}/03-raycluster.yaml" --ignore-not-found=true 2>/dev/null || true
 
 echo "Deleting MLflow..."
 kubectl delete -f "${MANIFESTS_DIR}/02-mlflow.yaml" --ignore-not-found=true 2>/dev/null || true

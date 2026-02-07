@@ -1,5 +1,5 @@
 # KubeRay Cluster for Distributed Feast Feature Processing
-# Based on: https://feast.dev/blog/feast-ray-distributed-processing/
+# MINIMAL RESOURCES - CPU only, no GPUs
 # Requires: KubeRay operator installed in the cluster
 apiVersion: ray.io/v1
 kind: RayCluster
@@ -13,18 +13,20 @@ metadata:
     # Disable ODH TLS for internal cluster communication
     odh.ray.io/secure-trusted-network: "false"
 spec:
-  rayVersion: '2.35.0'
+  rayVersion: '2.52.1'
   # Autoscaling disabled for Kueue compatibility
   enableInTreeAutoscaling: false
   
-  # Head node configuration
+  # Head node configuration - Adequate memory for Feast + Ray operations
   headGroupSpec:
     serviceType: ClusterIP
     rayStartParams:
       dashboard-host: '0.0.0.0'
       num-cpus: '2'
+      num-gpus: '0'  # Explicitly disable GPUs
       block: 'true'
       ray-client-server-port: '10001'
+      object-store-memory: '2000000000'  # 2GB for object store
     template:
       metadata:
         labels:
@@ -34,7 +36,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: quay.io/modh/ray:2.35.0-py311-cu121
+          image: quay.io/modh/ray:2.52.1-py312-cu128
           ports:
           - containerPort: 6379
             name: gcs
@@ -47,10 +49,10 @@ spec:
           resources:
             limits:
               cpu: "4"
-              memory: "8Gi"
+              memory: "12Gi"
             requests:
-              cpu: "2"
-              memory: "4Gi"
+              cpu: "1"
+              memory: "8Gi"
           env:
           - name: RAY_GRAFANA_HOST
             value: "http://grafana:3000"
@@ -59,27 +61,38 @@ spec:
           # Pre-install Feast on head node
           - name: RAY_RUNTIME_ENV_SETUP
             value: "pip install feast[postgres,ray]==0.59.0 psycopg2-binary"
+          # Prevent GPU detection
+          - name: CUDA_VISIBLE_DEVICES
+            value: ""
           volumeMounts:
           - name: ray-logs
             mountPath: /tmp/ray
           - name: shared-storage
             mountPath: /shared
+          - name: dshm
+            mountPath: /dev/shm
         volumes:
         - name: ray-logs
           emptyDir: {}
         - name: shared-storage
           persistentVolumeClaim:
             claimName: feast-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
   
-  # Worker nodes configuration
+  # Worker nodes configuration - Adequate memory for distributed processing
   workerGroupSpecs:
-  - replicas: 2
+  - replicas: 1
     minReplicas: 1
-    maxReplicas: 4
+    maxReplicas: 2
     groupName: workers
     rayStartParams:
-      num-cpus: '4'
+      num-cpus: '2'
+      num-gpus: '0'  # Explicitly disable GPUs
       block: 'true'
+      object-store-memory: '2000000000'  # 2GB for object store
     template:
       metadata:
         labels:
@@ -89,28 +102,37 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: quay.io/modh/ray:2.35.0-py311-cu121
+          image: quay.io/modh/ray:2.52.1-py312-cu128
           resources:
             limits:
               cpu: "4"
-              memory: "8Gi"
+              memory: "12Gi"
             requests:
-              cpu: "2"
-              memory: "4Gi"
+              cpu: "1"
+              memory: "8Gi"
           env:
           - name: RAY_DISABLE_MEMORY_MONITOR
             value: "1"
+          # Prevent GPU detection
+          - name: CUDA_VISIBLE_DEVICES
+            value: ""
           volumeMounts:
           - name: ray-logs
             mountPath: /tmp/ray
           - name: shared-storage
             mountPath: /shared
+          - name: dshm
+            mountPath: /dev/shm
         volumes:
         - name: ray-logs
           emptyDir: {}
         - name: shared-storage
           persistentVolumeClaim:
             claimName: feast-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
 ---
 # Service for Ray head node
 apiVersion: v1

@@ -219,7 +219,7 @@ complete-mlops-pipeline/
 │   ├── 00-prereqs.yaml           # Namespace + ClusterTrainingRuntime
 │   ├── 01-postgres.yaml          # PostgreSQL (Red Hat certified)
 │   ├── 02-mlflow.yaml            # MLflow tracking server
-│   ├── 03-kuberay.yaml           # KubeRay cluster
+│   ├── 03-raycluster.yaml           # KubeRay cluster
 │   ├── 04-feast-prereqs.yaml     # PVC, ServiceAccount, RBAC
 │   ├── 05-dataprep-job.yaml      # Dataprep RayJob (Feast + KubeRay)
 │   └── 06-trainjob.yaml          # TrainJob with MLflow
