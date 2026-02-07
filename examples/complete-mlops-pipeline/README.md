@@ -18,61 +18,18 @@ This example demonstrates a **production-grade MLOps pipeline** integrating key 
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            OpenShift AI Cluster                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   ┌─────────────┐                                                           │
-│   │  Workbench  │──────────────────────────────────────────────┐            │
-│   │ (Notebooks) │                                              │            │
-│   └─────────────┘                                              │            │
-│          │                                                     │            │
-│          │                                                     ▼            │
-│          │         ┌──────────────────────────────────────────────────┐     │
-│          │         │              KubeRay Cluster                     │     │
-│          │         │  ┌────────┐   ┌────────┐   ┌────────┐            │     │
-│          │         │  │  Head  │   │ Worker │   │ Worker │            │     │
-│          │         │  └────────┘   └────────┘   └────────┘            │     │
-│          │         └──────────────────────────────────────────────────┘     │
-│          │                          │                                       │
-│          ▼                          ▼                                       │
-│   ┌─────────────┐         ┌─────────────────┐      ┌─────────────┐          │
-│   │    Feast    │────────▶│   PostgreSQL    │◀─────│   MLflow    │          │
-│   │Feature Store│         │ - Feast Registry│      │  Tracking   │          │
-│   └─────────────┘         │ - Online Store  │      │  Server     │          │
-│          │                │ - MLflow Backend│      └──────┬──────┘          │
-│          │                │ - Model Registry│             │                 │
-│          │                └─────────────────┘             │                 │
-│          │                        ▲                       │                 │
-│          │                        │                       │                 │
-│          │                ┌───────┴───────┐               │                 │
-│          │                │Model Registry │◀──────────────┘                 │
-│          │                │  (OpenShift)  │                                 │
-│          │                └───────────────┘                                 │
-│          │                        │                                         │
-│          │                        ▼                                         │
-│          │                ┌───────────────┐                                 │
-│          │                │    KServe     │                                 │
-│          │                │ (Deployment)  │                                 │
-│          │                └───────────────┘                                 │
-│          ▼                                                                  │
-│   ┌─────────────────────────────────────────────────────────────────┐       │
-│   │                    Kubeflow Training Operator                   │       │
-│   │  ┌─────────────────────────────────────────────────────────┐    │       │
-│   │  │                      TrainJob                           │    │       │
-│   │  │  Node-0 ──▶ Node-1 ──▶ Node-N  (Distributed PyTorch)    │    │       │
-│   │  └─────────────────────────────────────────────────────────┘    │       │
-│   └─────────────────────────────────────────────────────────────────┘       │
-│                                    │                                        │
-│                                    ▼                                        │
-│   ┌─────────────────────────────────────────────────────────────────┐       │
-│   │                   NFS Shared Storage (RWX)                      │       │
-│   │  /data (parquet)  /feature_repo  /models  /mlflow-artifacts     │       │
-│   └─────────────────────────────────────────────────────────────────┘       │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+![Architecture Overview](./docs/architecture.png)
+
+### Component Interactions
+
+| Layer | Components | Purpose |
+|-------|------------|---------|
+| **Feature Store** | Feast + PostgreSQL + Ray | Feature engineering, online/offline serving |
+| **Compute** | KubeRay Cluster | Distributed feature processing |
+| **Training** | Kubeflow Training Operator | Distributed PyTorch DDP training |
+| **Tracking** | MLflow Server | Experiment metrics, model artifacts |
+| **Serving** | KServe + OpenShift Route | Low-latency model inference |
+| **Storage** | NFS PVC (RWX) | Shared data, models, artifacts |
 
 ## Requirements
 
@@ -113,18 +70,17 @@ kubectl wait --for=condition=ready pod --all -n feast-mlops-demo --timeout=300s
 | `02-training.ipynb` | Model training with tracking | **Kubeflow + MLflow** |
 | `03-inference.ipynb` | Online inference | **Feast + Model** |
 
-### Pipeline Flow
+### Feast + Ray Flow
 
-```
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  01-Features     │───▶│   02-Training    │───▶│  03-Inference    │
-│                  │    │                  │    │                  │
-│ • Verify infra   │    │ • Fetch features │    │ • Load model     │
-│ • Generate data  │    │ • Train model    │    │ • Online features│
-│ • Register feats │    │ • Submit TrainJob│    │ • Predict        │
-│ • Materialize    │    │ • MLflow log     │    │ • Visualize      │
-└──────────────────┘    └──────────────────┘    └──────────────────┘
-```
+![Feast Ray Integration](./docs/feast-ray.png)
+
+### Training Flow
+
+![Training Sequence](./docs/training-flow.png)
+
+### Inference Flow
+
+![Inference Sequence](./docs/inference-flow.png)
 
 ## What You'll Learn
 

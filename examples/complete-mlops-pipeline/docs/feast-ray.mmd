@@ -1,0 +1,25 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e3f2fd', 'primaryTextColor': '#1a1a1a', 'primaryBorderColor': '#1976d2', 'lineColor': '#1976d2'}}}%%
+flowchart LR
+    Notebook["📓 Notebook"]
+    
+    subgraph Feast["Feast Feature Store"]
+        CLI["feast apply<br/>feast materialize"]
+    end
+    
+    subgraph Ray["Ray Cluster"]
+        Head["Head"] --> W1["Worker"] & W2["Worker"]
+    end
+    
+    subgraph Storage["Storage"]
+        PG[(PostgreSQL<br/>Online Store)]
+        PVC[("Parquet<br/>Files")]
+    end
+    
+    Notebook --> CLI
+    CLI -->|distribute| Head
+    W1 & W2 -->|read| PVC
+    W1 & W2 -->|write| PG
+    
+    style Feast fill:#fff5f5,stroke:#dc3545
+    style Ray fill:#fff3e0,stroke:#f57c00
+    style Storage fill:#e8f5e9,stroke:#388e3c

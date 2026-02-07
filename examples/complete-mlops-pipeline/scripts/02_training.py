@@ -30,7 +30,7 @@ def train_sales_model():
 
     # Config from env
     mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    data_dir = os.getenv("DATA_DIR", "/mnt/shared/data")
+    feature_repo = os.getenv("FEATURE_REPO", "/mnt/shared/feature_repo")
     model_dir = os.getenv("MODEL_DIR", "/mnt/shared/models")
     epochs = int(os.getenv("EPOCHS", 50))
     batch_size = int(os.getenv("BATCH_SIZE", 256))
@@ -55,12 +55,33 @@ def train_sales_model():
                 nn.Linear(64, 1))
         def forward(self, x): return self.net(x).squeeze(-1)
 
-    # Load data
-    df = pd.read_parquet(f"{data_dir}/features.parquet")
-    cols = [c for c in ["lag_1","lag_2","lag_4","lag_8","lag_52","rolling_mean_4w","store_size","temperature","fuel_price","cpi","unemployment"] if c in df.columns]
+    # === FEAST: Load training data via get_historical_features() ===
+    if rank == 0: print(f"Loading features from Feast (repo: {feature_repo})...")
+    from feast import FeatureStore
+    store = FeatureStore(repo_path=feature_repo)
+    
+    # Create entity DataFrame (all store-dept combinations for training window)
+    from sqlalchemy import create_engine, text
+    pg_url = "postgresql://feast:feast123@feast-postgres:5432/feast"
+    engine = create_engine(pg_url)
+    with engine.connect() as conn:
+        entity_df = pd.read_sql("SELECT store, dept, date as event_timestamp FROM sales_features", conn)
+    entity_df = entity_df.dropna()
+    if rank == 0: print(f"Entity DataFrame: {len(entity_df):,} rows")
+    
+    # Fetch training data via Feast (distributed via Ray!)
+    df = store.get_historical_features(
+        entity_df=entity_df,
+        features=store.get_feature_service("demand_forecasting_service")
+    ).to_df()
+    if rank == 0: print(f"✅ Fetched {len(df):,} samples with {len(df.columns)} features from Feast")
+    
+    # Feature columns (exclude entities and target)
+    exclude = ["store", "dept", "event_timestamp", "weekly_sales"]
+    cols = [c for c in df.columns if c not in exclude and df[c].dtype in ["float64", "int64", "float32", "int32"]]
     df = df.dropna(subset=cols + ["weekly_sales"])
     X, y = df[cols].values, df["weekly_sales"].values
-    if rank == 0: print(f"Data: {len(df):,} samples, {len(cols)} features")
+    if rank == 0: print(f"Training data: {len(df):,} samples, {len(cols)} features: {cols[:5]}...")
 
     # Scale & split
     scaler_X, scaler_y = StandardScaler(), StandardScaler()
