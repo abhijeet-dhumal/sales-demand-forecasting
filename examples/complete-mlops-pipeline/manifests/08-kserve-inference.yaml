@@ -120,13 +120,19 @@ data:
             response.raise_for_status()
             result = response.json()
             
+            # Feast Feature Server response format:
+            # {"metadata": {"feature_names": [...]}, "results": [{"values": [...], ...}, ...]}
+            feature_names = result.get("metadata", {}).get("feature_names", [])
+            results = result.get("results", [])
+            
             # Parse response into feature matrix
             features = []
             for i in range(len(entity_rows)):
                 row = {}
-                for name, values in result.get("results", []):
-                    if name in feature_cols:
-                        row[name] = values[i] if values[i] is not None else 0
+                for j, name in enumerate(feature_names):
+                    if name in feature_cols and j < len(results):
+                        val = results[j].get("values", [None])[i] if i < len(results[j].get("values", [])) else None
+                        row[name] = val if val is not None else 0
                 features.append(row)
             
             return features
