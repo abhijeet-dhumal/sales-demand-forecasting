@@ -1,45 +1,27 @@
 # Kustomize configuration for Sales Forecasting MLOps Pipeline
-# 
-# This deploys the INFRASTRUCTURE only.
-# Notebooks handle: data prep (01), training (02), inference (03)
 #
-# Usage:
-#   kubectl apply -k manifests/
-#
-# Or with a custom namespace:
-#   kubectl kustomize manifests/ | sed 's/feast-trainer-demo/my-namespace/g' | kubectl apply -f -
+# Usage: kubectl apply -k manifests/
 #
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: feast-trainer-demo
 
-# Common labels applied to all resources
 labels:
   - pairs:
       app.kubernetes.io/part-of: sales-forecasting-mlops
-      app.kubernetes.io/managed-by: kustomize
     includeSelectors: false
 
-# Infrastructure resources (order matters for dependencies)
 resources:
-  # 1. Namespace and ClusterTrainingRuntime
-  - 00-prereqs.yaml
-  # 2. PostgreSQL database (Feast registry, online store, MLflow backend)
-  - 01-postgres.yaml
-  # 3. MLflow tracking server
-  - 02-mlflow.yaml
-  # 4. KubeRay cluster for distributed Feast processing
-  - 03-raycluster.yaml
-  # 5. Shared PVC and RBAC for Feast/Training
-  - 04-feast-prereqs.yaml
-  # 6. Feast Feature Server (REST API for online serving)
-  - 04b-feast-server.yaml
-  # 7. (Optional) Model Registry - uncomment if using OpenShift AI Model Registry
-  # - 07-model-registry.yaml
+  - 00-prereqs.yaml      # Namespace, RBAC
+  - 01-postgres.yaml     # PostgreSQL (Feast + MLflow)
+  - 02-mlflow.yaml       # MLflow Server
+  - 03-raycluster.yaml   # KubeRay Cluster
+  - 04-feast-prereqs.yaml   # PVC, ServiceAccount
+  - 04b-feast-server.yaml   # Feast REST API
 
-# Note: The following are NOT included - handled by notebooks:
-# - 05-dataprep-job.yaml    → 01-feast-features.ipynb
-# - 06-trainjob.yaml        → 02-training.ipynb  
-# - 08-kserve-inference.yaml → 03-inference.ipynb
+# Jobs handled separately:
+# - 05-dataprep-job.yaml
+# - 06-trainjob.yaml
+# - 08-kserve-inference.yaml
 

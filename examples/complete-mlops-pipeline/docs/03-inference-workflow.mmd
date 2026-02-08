@@ -1,50 +1,42 @@
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f5e9', 'primaryTextColor': '#1a1a1a', 'primaryBorderColor': '#388e3c', 'lineColor': '#455a64'}}}%%
-flowchart TB
-    subgraph Notebook["📓 03-inference.ipynb"]
-        direction TB
-        
-        subgraph Setup["1️⃣ Setup"]
-            S1["Configure Endpoint<br/>(KServe URL)"]
-            S2["Health Check<br/>(/health)"]
-        end
-        
-        subgraph Realtime["2️⃣ Real-time Inference"]
-            R1["Single Request<br/>{store_id: 1, dept_id: 3}"]
-            R2["KServe fetches from Feast<br/>(inference_features)"]
-            R3["Return Prediction<br/>($107,197)"]
-        end
-        
-        subgraph Batch["3️⃣ Batch Scoring"]
-            B1["Generate All Entities<br/>(10 stores × 5 depts)"]
-            B2["POST to same endpoint<br/>(multiple entities)"]
-            B3["Save Predictions<br/>(parquet + CSV)"]
-        end
-    end
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e3f2fd',
+    'primaryTextColor': '#1a1a1a',
+    'primaryBorderColor': '#90caf9',
+    'lineColor': '#455a64'
+  }
+}}%%
+flowchart LR
+    %% Main unidirectional flow
+    A["🌐 <b>Request</b><br/><i>{store_id: 1, dept_id: 3}</i>"]
+    B["🍕 <b>Get Online Features</b><br/><i>Feast Server → PostgreSQL</i>"]
+    C["⚙️ <b>Scale Input</b><br/><i>StandardScaler.transform()</i>"]
+    D["🎯 <b>Model Predict</b><br/><i>PyTorch MLP forward()</i>"]
+    E["⚙️ <b>Inverse Scale</b><br/><i>Convert to dollars</i>"]
+    F["✅ <b>Response</b><br/><i>$107,197</i>"]
 
-    subgraph Infra["Infrastructure"]
-        KS["🚀 KServe<br/>InferenceService"]
-        FS["🍕 Feature Server<br/>(REST API)"]
-        PG[(PostgreSQL<br/>Online Store)]
-        PVC[(Storage<br/>Predictions)]
-    end
+    A -->|"entity"| B -->|"features"| C -->|"scaled"| D -->|"raw_pred"| E -->|"prediction"| F
 
-    S1 --> S2
-    S2 --> R1 --> R2 --> R3
-    R3 --> B1 --> B2 --> B3
+    %% Infrastructure (below)
+    KS["🚀 KServe"]
+    FS["🍕 Feast Server"]
+    PG[("🐘 PostgreSQL")]
+    PVC[("💾 Model + Scalers")]
 
-    R2 --> KS
-    KS --> FS
-    FS --> PG
-    B3 --> PVC
+    A -.->|"POST"| KS
+    B -.->|"query"| FS
+    FS -.->|"lookup"| PG
+    C -.->|"load"| PVC
+    D -.->|"load"| PVC
 
-    User["🌐 User / Client"]
-    User -->|"entities"| R1
-    R3 -->|"prediction"| User
-    B2 -->|"batch"| KS
-
-    style Notebook fill:#e8f5e9,stroke:#388e3c,color:#1a1a1a
-    style Setup fill:#e3f2fd,stroke:#1976d2,color:#1a1a1a
-    style Realtime fill:#fff3e0,stroke:#f57c00,color:#1a1a1a
-    style Batch fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
-    style Infra fill:#eceff1,stroke:#607d8b,color:#1a1a1a
-
+    style A fill:#e8f5e9,stroke:#81c784,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style D fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style E fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style F fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
+    style KS fill:#fafafa,stroke:#bdbdbd
+    style FS fill:#fafafa,stroke:#bdbdbd
+    style PG fill:#fafafa,stroke:#bdbdbd
+    style PVC fill:#fafafa,stroke:#bdbdbd

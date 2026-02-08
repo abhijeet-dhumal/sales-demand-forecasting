@@ -1,51 +1,43 @@
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#fff3e0', 'primaryTextColor': '#1a1a1a', 'primaryBorderColor': '#f57c00', 'lineColor': '#455a64'}}}%%
-flowchart TB
-    subgraph Notebook["📓 02-training.ipynb"]
-        direction TB
-        
-        subgraph Features["1️⃣ Feature Retrieval (Feast + Ray)"]
-            F1["Create Entity DataFrame<br/>(store_id, dept_id, timestamp)"]
-            F2["get_historical_features()<br/>(training_features service)"]
-            F3["Receive Training Dataset<br/>(with point-in-time joins)"]
-        end
-        
-        subgraph Train["2️⃣ Distributed Training"]
-            T1["Preprocess Data<br/>(StandardScaler)"]
-            T2["Train PyTorch MLP<br/>(4-layer, 2 nodes DDP)"]
-            T3["Validate & Early Stop<br/>(best model selection)"]
-        end
-        
-        subgraph Save["3️⃣ Save Artifacts"]
-            S1["Save Model<br/>(best_model.pt)"]
-            S2["Save Scalers<br/>(scalers.joblib)"]
-            S3["Log to MLflow<br/>(metrics, params, model)"]
-        end
-    end
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e3f2fd',
+    'primaryTextColor': '#1a1a1a',
+    'primaryBorderColor': '#90caf9',
+    'lineColor': '#455a64'
+  }
+}}%%
+flowchart LR
+    %% Main unidirectional flow
+    A["📂 <b>Entity DataFrame</b><br/><i>store_id, dept_id, timestamp</i>"]
+    B["🍕 <b>get_historical_features</b><br/><i>Point-in-time joins via Ray</i>"]
+    C["⚙️ <b>Preprocess</b><br/><i>Scale + Train/Val split</i>"]
+    D["🎯 <b>Train PyTorch</b><br/><i>DDP on 2 nodes</i>"]
+    E["💾 <b>Save Artifacts</b><br/><i>model.pt + scalers.joblib</i>"]
+    F["📈 <b>Log MLflow</b><br/><i>metrics, params, model</i>"]
+    G["✅ <b>Done</b><br/><i>MAPE ~3%</i>"]
 
-    subgraph Infra["Infrastructure"]
-        Ray["⚡ KubeRay<br/>(distributed PIT joins)"]
-        Feast["🍕 Feast<br/>Feature Store"]
-        MLflow["📈 MLflow<br/>Experiment Tracking"]
-        PVC[(💾 Storage<br/>Models + Data)]
-    end
+    A -->|"entities"| B -->|"training_df"| C -->|"tensors"| D -->|"best_model"| E -->|"log"| F -->|"complete"| G
 
-    F1 --> F2 --> F3
-    F3 --> T1 --> T2 --> T3
-    T3 --> S1 --> S2 --> S3
+    %% Infrastructure (below)
+    Feast["🍕 Feast"]
+    Ray["⚡ KubeRay"]
+    PVC[("💾 Shared PVC")]
+    MLF["📈 MLflow"]
 
-    F2 --> Feast
-    Feast -.->|"distributed"| Ray
-    Ray -.->|"read"| PVC
-    S1 --> PVC
-    S2 --> PVC
-    S3 --> MLflow
+    B -.->|"query"| Feast
+    Feast -.->|"distribute"| Ray
+    E -.->|"save"| PVC
+    F -.->|"track"| MLF
 
-    Output["✅ Model trained<br/>MAPE ~3%"]
-    S3 --> Output
-
-    style Notebook fill:#fff3e0,stroke:#f57c00,color:#1a1a1a
-    style Features fill:#e3f2fd,stroke:#1976d2,color:#1a1a1a
-    style Train fill:#fce4ec,stroke:#c2185b,color:#1a1a1a
-    style Save fill:#e8f5e9,stroke:#388e3c,color:#1a1a1a
-    style Infra fill:#eceff1,stroke:#607d8b,color:#1a1a1a
-
+    style A fill:#e8f5e9,stroke:#81c784,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style D fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style E fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px
+    style F fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px
+    style G fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
+    style Feast fill:#fafafa,stroke:#bdbdbd
+    style Ray fill:#fafafa,stroke:#bdbdbd
+    style PVC fill:#fafafa,stroke:#bdbdbd
+    style MLF fill:#fafafa,stroke:#bdbdbd

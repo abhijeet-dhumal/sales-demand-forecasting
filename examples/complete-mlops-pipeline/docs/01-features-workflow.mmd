@@ -1,48 +1,39 @@
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e3f2fd', 'primaryTextColor': '#1a1a1a', 'primaryBorderColor': '#1976d2', 'lineColor': '#455a64'}}}%%
-flowchart TB
-    subgraph Notebook["📓 01-feast-features.ipynb"]
-        direction TB
-        
-        subgraph Data["1️⃣ Data Preparation"]
-            D1["Generate Synthetic<br/>Sales Data"]
-            D2["Add Lag Features<br/>(104 weeks × 10 stores × 5 depts)"]
-            D3["Save as Parquet<br/>/shared/data/"]
-        end
-        
-        subgraph Define["2️⃣ Feature Definition"]
-            F1["Define Entities<br/>(store, department)"]
-            F2["Create Feature Views<br/>(sales_features, store_features)"]
-            F3["Define Feature Services<br/>(training, inference)"]
-        end
-        
-        subgraph Register["3️⃣ Register & Materialize"]
-            R1["feast apply<br/>(register to PostgreSQL)"]
-            R2["feast materialize<br/>(sync to online store)"]
-        end
-    end
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e3f2fd',
+    'primaryTextColor': '#1a1a1a',
+    'primaryBorderColor': '#90caf9',
+    'lineColor': '#455a64'
+  }
+}}%%
+flowchart LR
+    %% Main unidirectional flow
+    A["📂 <b>Raw Data</b><br/><i>Walmart sales CSV</i>"]
+    B["⚙️ <b>Feature Engineering</b><br/><i>lag_1, lag_4, rolling_mean</i>"]
+    C["💾 <b>Save Parquet</b><br/><i>/shared/data/*.parquet</i>"]
+    D["🍕 <b>feast apply</b><br/><i>Register to Feast</i>"]
+    E["⚡ <b>feast materialize</b><br/><i>Sync to Online Store</i>"]
+    F["✅ <b>Ready</b><br/><i>Training + Inference</i>"]
 
-    subgraph Infra["Infrastructure"]
-        Ray["⚡ Ray Cluster<br/>(distributed sync)"]
-        PG[(PostgreSQL<br/>Online Store)]
-        PVC[(Parquet Files<br/>Offline Store)]
-    end
+    A -->|"load"| B -->|"transform"| C -->|"register"| D -->|"sync"| E -->|"done"| F
 
-    D1 --> D2 --> D3
-    D3 --> F1
-    F1 --> F2 --> F3
-    F3 --> R1 --> R2
+    %% Infrastructure (below)
+    PVC[("💾 Shared PVC")]
+    PG[("🐘 PostgreSQL")]
+    Ray["⚡ KubeRay"]
 
-    D3 --> PVC
-    R1 --> PG
-    R2 -.->|"big data"| Ray
-    Ray --> PG
+    C -.->|"write"| PVC
+    D -.->|"schema"| PG
+    E -.->|"distributed"| Ray
+    Ray -.->|"online features"| PG
 
-    Output["✅ Features ready for<br/>Training & Inference"]
-    R2 --> Output
-
-    style Notebook fill:#e3f2fd,stroke:#1976d2,color:#1a1a1a
-    style Data fill:#e8f5e9,stroke:#388e3c,color:#1a1a1a
-    style Define fill:#fff3e0,stroke:#f57c00,color:#1a1a1a
-    style Register fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
-    style Infra fill:#eceff1,stroke:#607d8b,color:#1a1a1a
-
+    style A fill:#e8f5e9,stroke:#81c784,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style D fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style E fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px
+    style F fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
+    style PVC fill:#fafafa,stroke:#bdbdbd
+    style PG fill:#fafafa,stroke:#bdbdbd
+    style Ray fill:#fafafa,stroke:#bdbdbd
