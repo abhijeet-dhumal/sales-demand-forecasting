@@ -91,8 +91,9 @@ data:
         # Load scalers
         scalers = joblib.load(f"{model_dir}/scalers.joblib")
         feature_cols = metadata["feature_columns"]
+        use_log_transform = scalers.get("use_log_transform", False)
 
-        logger.info(f"Model loaded: {len(feature_cols)} features, arch={hidden_dims}")
+        logger.info(f"Model loaded: {len(feature_cols)} features, arch={hidden_dims}, log_transform={use_log_transform}")
         logger.info(f"Best MAPE: {metadata.get('best_mape', 'N/A')}%")
         logger.info(f"Feast Feature Server: {FEAST_SERVER_URL}")
 
@@ -216,6 +217,10 @@ data:
                 preds = model(torch.FloatTensor(X_scaled)).numpy()
 
             predictions = scalers["scaler_y"].inverse_transform(preds.reshape(-1, 1)).flatten()
+            
+            # Reverse log transform if used during training
+            if use_log_transform:
+                predictions = np.expm1(predictions)
 
             return jsonify({
                 "predictions": predictions.tolist(),
@@ -257,6 +262,10 @@ data:
                 preds = model(torch.FloatTensor(X_scaled)).numpy()
 
             predictions = scalers["scaler_y"].inverse_transform(preds.reshape(-1, 1)).flatten()
+            
+            # Reverse log transform if used during training
+            if use_log_transform:
+                predictions = np.expm1(predictions)
 
             return jsonify({
                 "predictions": predictions.tolist(),

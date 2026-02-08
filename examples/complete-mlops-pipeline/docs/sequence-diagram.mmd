@@ -1,0 +1,145 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'actorBkg': '#e3f2fd',
+    'actorTextColor': '#1a1a1a',
+    'actorBorder': '#90caf9',
+    'signalColor': '#1a1a1a',
+    'signalTextColor': '#1a1a1a',
+    'labelBoxBkgColor': '#e8eaf6',
+    'labelTextColor': '#1a1a1a',
+    'loopTextColor': '#1a1a1a',
+    'noteBkgColor': '#fffde7',
+    'noteTextColor': '#1a1a1a',
+    'activationBkgColor': '#ffcc80',
+    'sequenceNumberColor': '#1a1a1a'
+  }
+}}%%
+
+sequenceDiagram
+    autonumber
+
+    %% Actors - Role Separation + Storage
+    participant Ops as 🔧 MLOps Engineer
+    participant DS as 👨‍🔬 Data Scientist
+    participant PVC as 💾 Shared Storage
+    participant Ray as ⚡ KubeRay
+    participant PG as 🐘 PostgreSQL
+    participant Feast as 🍕 Feast
+    participant MLF as 📈 MLflow
+    participant KServe as 🚀 KServe
+
+    %% ==================== PHASE 0: INFRASTRUCTURE SETUP ====================
+    rect rgb(236, 239, 241)
+        Note over Ops,KServe: 🔧 Phase 0: Infrastructure Setup (One-time)
+        
+        Ops->>PVC: Create PVC (100Gi RWX)
+        Ops->>PG: Deploy PostgreSQL (registry + online store)
+        Ops->>Ray: Deploy RayCluster (head + 2 workers)
+        Ops->>MLF: Deploy MLflow Server (v3.9)
+        Ops->>Feast: Deploy Feature Server (:6566)
+        
+        Note over Ops: ✅ Platform ready for Data Scientists
+    end
+
+    %% ==================== PHASE 1: FEATURE ENGINEERING ====================
+    rect rgb(227, 242, 253)
+        Note over DS,Feast: 📊 Phase 1: Feature Engineering (01-feast-features.ipynb)
+        
+        DS->>DS: Load/generate sales data (~5K rows)
+        DS->>PVC: Save sales_features.parquet
+        
+        DS->>Feast: feast apply (define features)
+        activate Feast
+        Feast->>PG: Register entities, views, services
+        Note right of PG: Feature definitions versioned
+        Feast-->>DS: ✓ Features registered
+        deactivate Feast
+        
+        DS->>Feast: feast materialize
+        activate Feast
+        Feast->>Ray: batch_engine distributes work
+        activate Ray
+        Ray->>PVC: Read parquet partitions
+        Ray->>PG: Write to online store
+        deactivate Ray
+        Note right of PG: Online store: ~5ms reads
+        Feast-->>DS: ✓ Materialization complete
+        deactivate Feast
+    end
+
+    %% ==================== PHASE 2: MODEL TRAINING ====================
+    rect rgb(255, 243, 224)
+        Note over DS,MLF: 🎯 Phase 2: Model Training (02-training.ipynb)
+        
+        loop Iterate until metrics satisfied
+            DS->>DS: Submit Kubeflow TrainJob (2 nodes)
+            activate DS
+            
+            DS->>Feast: get_historical_features(training_features)
+            activate Feast
+            Note over Feast,Ray: Same feature definitions as inference!
+            Feast->>Ray: Distributed point-in-time joins
+            activate Ray
+            Ray->>PVC: Read parquet partitions
+            Ray-->>Feast: Training DataFrame
+            deactivate Ray
+            Feast-->>DS: Features with correct history
+            deactivate Feast
+            
+            DS->>DS: Train PyTorch MLP (4 layers, DDP)
+            DS->>PVC: Save best_model.pt, scalers.joblib
+            
+            DS->>MLF: Log experiment
+            activate MLF
+            Note right of MLF: params, metrics, artifacts
+            MLF-->>DS: Run ID, Model Version
+            deactivate MLF
+            
+            deactivate DS
+        end
+        
+        Note over DS: ✅ Best model: MAPE ~3%
+    end
+
+    %% ==================== PHASE 3: MODEL SERVING ====================
+    rect rgb(232, 245, 233)
+        Note over DS,KServe: 🚀 Phase 3: Model Deployment (03-inference.ipynb)
+        
+        DS->>KServe: Deploy InferenceService
+        activate KServe
+        KServe->>PVC: Load model + scalers
+        KServe-->>DS: ✓ Endpoint ready
+        deactivate KServe
+    end
+
+    %% ==================== PHASE 4: PRODUCTION INFERENCE ====================
+    rect rgb(243, 229, 245)
+        Note over DS,KServe: 🌐 Phase 4: Production Inference
+        
+        participant User as 🌐 End User
+        
+        User->>KServe: POST /predict-with-feast {store_id: 1, dept_id: 3}
+        activate KServe
+        
+        KServe->>Feast: GET /get-online-features
+        activate Feast
+        Note over Feast: Same inference_features service!
+        Feast->>PG: Query online store
+        Note right of PG: Latency: ~5ms
+        PG-->>Feast: {lag_1, rolling_mean, temperature, ...}
+        Feast-->>KServe: Feature vector (9 features)
+        deactivate Feast
+        
+        KServe->>KServe: Scale → Predict → Inverse scale
+        KServe-->>User: {prediction: $107,197}
+        Note right of User: E2E latency: ~50ms
+        deactivate KServe
+        
+        Note over User,KServe: Batch scoring: Same endpoint, multiple entities
+    end
+
+    %% ==================== KEY INSIGHTS ====================
+    Note over Feast: 🔑 Train-Serve Consistency: Same FeatureService in training & inference
+    Note over Ray: 🔑 Distributed PIT joins + materialization (scales to billions)
+    Note over PVC: 🔑 Central storage: parquet, models, scalers

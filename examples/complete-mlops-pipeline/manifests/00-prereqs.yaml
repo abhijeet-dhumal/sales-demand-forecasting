@@ -1,5 +1,5 @@
 # Prerequisites for MLOps Pipeline
-# Namespace and ClusterTrainingRuntime
+# Namespace only - uses built-in "torch-distributed" ClusterTrainingRuntime
 ---
 apiVersion: v1
 kind: Namespace
@@ -8,48 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: feast-mlops
 
----
-# ClusterTrainingRuntime with shared storage
-# This is cluster-scoped, apply with cluster-admin
-# NOTE: The notebooks use the built-in "torch-distributed" runtime
-# This custom runtime is optional - only needed if you want pre-configured PVC mounts
-apiVersion: trainer.kubeflow.org/v1alpha1
-kind: ClusterTrainingRuntime
-metadata:
-  name: torch-with-storage
-  labels:
-    trainer.kubeflow.org/framework: torch
-spec:
-  mlPolicy:
-    numNodes: 1
-    torch:
-      numProcPerNode: auto
-  template:
-    spec:
-      replicatedJobs:
-      - name: node
-        replicas: 1
-        template:
-          metadata:
-            labels:
-              trainer.kubeflow.org/trainjob-ancestor-step: trainer
-          spec:
-            template:
-              spec:
-                volumes:
-                - name: shared-storage
-                  persistentVolumeClaim:
-                    claimName: feast-pvc
-                containers:
-                - name: node
-                  image: quay.io/modh/training:py311-cuda124-torch251
-                  resources:
-                    requests:
-                      cpu: "4"
-                      memory: "8Gi"
-                    limits:
-                      cpu: "8"
-                      memory: "16Gi"
-                  volumeMounts:
-                  - name: shared-storage
-                    mountPath: /shared
+# NOTE: No custom ClusterTrainingRuntime needed!
+# The notebooks use the built-in "torch-distributed" runtime and add
+# PVC mounts via PodTemplateOverrides in the TrainJob submission.
+# This is the recommended approach for portable, flexible training.

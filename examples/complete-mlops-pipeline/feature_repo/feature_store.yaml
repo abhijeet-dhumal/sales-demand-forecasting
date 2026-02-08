@@ -1,76 +1,28 @@
-# Feast Feature Store Configuration - Ray Distributed Processing
-# Architecture: PostgreSQL (registry/online) + Ray (offline/compute)
+# Feast Feature Store Configuration
+# For feast apply and materialize (file-based offline store)
 #
 # NAMESPACE: feast-trainer-demo
-# 
-# Components:
-# - Registry: PostgreSQL (durable, SQL-queryable)
-# - Offline Store: Ray (distributed file I/O for Parquet)
-# - Batch Engine: Ray (distributed PIT joins, aggregations)  
+#
+# Architecture:
+# - Registry: PostgreSQL (SQL-queryable)
+# - Offline Store: File (Parquet) - for apply/materialize
 # - Online Store: PostgreSQL (low-latency serving)
 #
-# Ray Cluster: feast-ray (connects via ray_address or KubeRay mode)
+# NOTE: For distributed training with Ray, use feature_store_ray.yaml
 
-project: sales_demand_forecasting
-
-# PostgreSQL registry for feature definitions and metadata
-registry:
-  registry_type: sql
-  path: postgresql+psycopg://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
-  cache_ttl_seconds: 60
-  sqlalchemy_config_kwargs:
-    pool_pre_ping: true
-    pool_size: 10
-    max_overflow: 20
+project: sales_forecasting
 
 provider: local
 
-# Ray Offline Store - File-based data I/O with Ray
-# Handles: read/write parquet, pull_latest, get_historical_features I/O
-# Mode: KubeRay (connects via CodeFlare SDK) - env vars override config
-offline_store:
-  type: ray
-  storage_path: /shared/data/ray_storage
-  
-  # Performance tuning
-  broadcast_join_threshold_mb: 100    # Threshold for broadcast joins
-  max_parallelism_multiplier: 2       # CPUs * multiplier = max parallelism
-  target_partition_size_mb: 64        # Target partition size
-  enable_ray_logging: true            # Enable Ray progress bars
-  
-  # KubeRay configuration (can also be set via env vars)
-  # Environment variables take precedence:
-  #   FEAST_RAY_USE_KUBERAY, FEAST_RAY_CLUSTER_NAME, 
-  #   FEAST_RAY_NAMESPACE, FEAST_RAY_AUTH_TOKEN
-  # use_kuberay: true
-  # kuberay_conf:
-  #   cluster_name: "feast-ray"
-  #   namespace: "feast-trainer-demo"
+# PostgreSQL registry for feature definitions
+registry:
+  registry_type: sql
+  path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+  cache_ttl_seconds: 60
 
-# Ray Compute Engine - Distributed Feature Processing
-# Handles: PIT joins, aggregations, materialization
-# Connects to dedicated RayCluster for distributed jobs
-batch_engine:
-  type: ray.engine
-  ray_address: "ray://feast-ray-head.feast-trainer-demo.svc.cluster.local:10001"
-  
-  # Worker configuration
-  max_workers: 4
-  max_parallelism_multiplier: 2
-  
-  # Feature join optimization
-  enable_optimization: true
-  broadcast_join_threshold_mb: 100
-  target_partition_size_mb: 64
-  window_size_for_joins: "1H"
-  enable_distributed_joins: true
-  enable_ray_logging: true
-  
-  # KubeRay mode (if ray_address is not reachable)
-  # use_kuberay: true
-  # kuberay_conf:
-  #   cluster_name: "feast-ray"
-  #   namespace: "feast-trainer-demo"
+# File-based offline store (for feast apply/materialize)
+offline_store:
+  type: file
 
 # PostgreSQL online store for low-latency serving
 online_store:
@@ -81,47 +33,5 @@ online_store:
   db_schema: public
   user: feast
   password: feast123
-  sslmode: prefer
 
 entity_key_serialization_version: 3
-
-# ARCHITECTURE DIAGRAM:
-# 
-# ┌─────────────────────────────────────────────────────────────────────────┐
-# │                        FEAST + RAY ARCHITECTURE                         │
-# ├─────────────────────────────────────────────────────────────────────────┤
-# │                                                                         │
-# │  ┌─────────────┐    ┌───────────────┐    ┌─────────────────────────┐   │
-# │  │  PostgreSQL │◄───│   Registry    │───►│  Feature Definitions    │   │
-# │  │   Registry  │    │  (SQL-based)  │    │  Entities, Views, etc.  │   │
-# │  └─────────────┘    └───────────────┘    └─────────────────────────┘   │
-# │                                                                         │
-# │  ┌─────────────────────────────────────────────────────────────────┐   │
-# │  │                      RAY CLUSTER (feast-ray)                     │   │
-# │  │  ┌─────────────────────┐    ┌─────────────────────────────────┐ │   │
-# │  │  │   Ray Offline Store │    │      Ray Compute Engine         │ │   │
-# │  │  │   (Data I/O Layer)  │    │   (Distributed Processing)      │ │   │
-# │  │  │                     │    │                                 │ │   │
-# │  │  │  • read_parquet()   │    │  • get_historical_features()   │ │   │
-# │  │  │  • write_parquet()  │    │  • materialize()               │ │   │
-# │  │  │  • pull_latest()    │    │  • PIT joins, aggregations     │ │   │
-# │  │  └─────────────────────┘    └─────────────────────────────────┘ │   │
-# │  │                              ▲                                   │   │
-# │  │                              │                                   │   │
-# │  │                     ┌────────┴────────┐                         │   │
-# │  │                     │  Parquet Files  │                         │   │
-# │  │                     │  (Shared PVC)   │                         │   │
-# │  │                     └─────────────────┘                         │   │
-# │  └─────────────────────────────────────────────────────────────────┘   │
-# │                                                                         │
-# │  ┌─────────────┐    ┌───────────────┐    ┌─────────────────────────┐   │
-# │  │  PostgreSQL │◄───│  Online Store │◄───│     materialize()       │   │
-# │  │  Online DB  │    │  (Low-Latency)│    │  (Ray Distributed)      │   │
-# │  └─────────────┘    └───────────────┘    └─────────────────────────┘   │
-# │         │                                                               │
-# │         ▼                                                               │
-# │  ┌─────────────────────────────────────────────────────────────────┐   │
-# │  │  get_online_features() → KServe InferenceService (Real-time)    │   │
-# │  └─────────────────────────────────────────────────────────────────┘   │
-# │                                                                         │
-# └─────────────────────────────────────────────────────────────────────────┘

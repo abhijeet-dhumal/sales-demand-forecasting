@@ -1,113 +1,210 @@
-# Complete MLOps Pipeline on OpenShift AI
+# Feast + KubeRay + Kubeflow Training on OpenShift AI
 
-**Feast + KubeRay + Kubeflow Training + MLflow + Model Registry**
+**Production MLOps: Feature Store → Distributed Training → Inference**
 
-This example demonstrates a **production-grade MLOps pipeline** integrating key OpenShift AI components:
+This example demonstrates **Feast + KubeRay** integration for distributed feature retrieval in Kubeflow TrainJobs:
 
-- **Feast** - Feature Store for feature management
-- **Ray/KubeRay** - Distributed data processing
-- **Kubeflow Training** - Distributed model training
-- **MLflow** - Experiment tracking, model logging & artifacts
-- **Model Registry** - Versioned model storage for KServe deployment
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                FEAST + KUBERAY + TRAINER INTEGRATION            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────┐     ┌─────────────────┐     ┌──────────────┐  │
+│  │   Feast     │     │  Kubeflow       │     │   KServe     │  │
+│  │  Registry   │────▶│  TrainJob       │────▶│  Inference   │  │
+│  │ (PostgreSQL)│     │                 │     │              │  │
+│  └─────────────┘     │  ┌───────────┐  │     │ ┌──────────┐ │  │
+│        │             │  │ Feast SDK │  │     │ │  Feast   │ │  │
+│        ▼             │  │ get_hist_ │──┼──┐  │ │  Server  │ │  │
+│  ┌─────────────┐     │  │ features()│  │  │  │ │  (REST)  │ │  │
+│  │   Offline   │     │  └───────────┘  │  │  │ └──────────┘ │  │
+│  │   Store     │────▶│                 │  │  │      │       │  │
+│  │  (Parquet)  │     └─────────────────┘  │  │      ▼       │  │
+│  └─────────────┘              │           │  │   Features   │  │
+│        │                      ▼           │  └──────────────┘  │
+│        │              ┌───────────────┐   │                    │
+│        │              │   KUBERAY     │◀──┘                    │
+│        ▼              │   CLUSTER     │                        │
+│  ┌─────────────┐      │ Distributed   │                        │
+│  │   Online    │      │ PIT Joins     │                        │
+│  │   Store     │      └───────────────┘                        │
+│  │ (PostgreSQL)│                                               │
+│  └─────────────┘                                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Value Proposition:** One feature definition, zero train-serve skew.
 
 > [!TIP]
-> **One Pipeline, Five Integrations**: This quickstart shows how Feast, Ray, Kubeflow Training, MLflow, and Model Registry work together seamlessly on OpenShift AI.
+> **Same Features, Everywhere**: Training calls `get_historical_features()`, inference calls `get_online_features()` - both use the same Feature Service definition.
 
 > [!IMPORTANT]
-> This example has been tested with OpenShift AI 3,2+ on configurations listed in the [validation](#validation) section.
+> Tested with OpenShift AI 3.2+ - see [validation](#validation) section.
 
 ## Architecture
 
-![Architecture Overview](./docs/architecture.png)
+### Feast + Trainer Integration Flow
 
-### Component Interactions
+```
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  01-feast-setup  │    │  02-training     │    │  03-inference    │
+│  (Notebook/Job)  │    │  (TrainJob)      │    │  (KServe)        │
+├──────────────────┤    ├──────────────────┤    ├──────────────────┤
+│                  │    │                  │    │                  │
+│ • Generate data  │    │ • Load Feast     │    │ • Load model     │
+│ • feast apply    │───▶│ • get_hist_feat()│───▶│ • Call Feast     │
+│ • materialize    │    │ • Train PyTorch  │    │   Server API     │
+│                  │    │ • Log to MLflow  │    │ • Return pred    │
+│                  │    │                  │    │                  │
+└───────┬──────────┘    └───────┬──────────┘    └───────┬──────────┘
+        │                       │                       │
+        ▼                       ▼                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     SHARED INFRASTRUCTURE                        │
+├──────────────────────────────────────────────────────────────────┤
+│  PostgreSQL          │  PVC (RWX)         │  MLflow Server      │
+│  • Feast Registry    │  • /shared/data    │  • Experiments      │
+│  • Online Store      │  • /shared/models  │  • Model Registry   │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-| Layer | Components | Purpose |
-|-------|------------|---------|
-| **Feature Store** | Feast + PostgreSQL + Ray | Feature engineering, online/offline serving |
-| **Compute** | KubeRay Cluster | Distributed feature processing |
-| **Training** | Kubeflow Training Operator | Distributed PyTorch DDP training |
-| **Tracking** | MLflow Server | Experiment metrics, model artifacts |
-| **Serving** | KServe + OpenShift Route | Low-latency model inference |
-| **Storage** | NFS PVC (RWX) | Shared data, models, artifacts |
+### Component Summary
+
+| Component | Purpose | Key Integration |
+|-----------|---------|-----------------|
+| **Feast** | Feature Store | Training + Inference use same Feature Service |
+| **Kubeflow Trainer** | Distributed Training | Calls `store.get_historical_features()` directly |
+| **MLflow** | Experiment Tracking | Logs metrics, artifacts, model registry |
+| **KServe** | Model Serving | Calls Feast Server for online features |
+| **PostgreSQL** | Durable Storage | Feast registry + online store + MLflow backend |
+| **PVC (RWX)** | Shared Storage | Data, models, feature repo shared across pods |
 
 ## Requirements
 
-* OpenShift cluster with **OpenShift AI (RHOAI) 3.2+** installed:
-  * Components enabled: `dashboard`, `ray`, `trainer`, `workbenches`, `mlflow`
-* Worker nodes with 2+ CPUs per Ray worker
-* Dynamic storage provisioner with **RWX** support (NFS-CSI recommended)
-* PostgreSQL for Feast registry and MLflow backend
+- **OpenShift AI 3.2+** with: `trainer`, `workbenches`, `mlflow` components
+- **RWX Storage** (NFS-CSI or equivalent) for shared PVC
+- **PostgreSQL** for Feast registry/online store and MLflow backend
 
 ## Quick Start
 
-### Option A: Automated Setup (5 minutes)
+### Option A: Manifests (Production)
 
 ```bash
-# Clone repository
+# Clone and deploy
 git clone https://github.com/<your-org>/sales-demand-forecasting.git
 cd sales-demand-forecasting/examples/complete-mlops-pipeline
 
-# Run setup script
-./scripts/setup.sh
+# Apply manifests in order
+kubectl apply -f manifests/00-prereqs.yaml
+kubectl apply -f manifests/01-postgres.yaml
+kubectl apply -f manifests/02-mlflow.yaml
+kubectl apply -f manifests/04-feast-prereqs.yaml
 
-# Wait for all pods
-kubectl wait --for=condition=ready pod --all -n feast-mlops-demo --timeout=300s
+# Wait for infrastructure
+kubectl wait --for=condition=ready pod -l app=postgres -n feast-trainer-demo --timeout=120s
+
+# Run dataprep job (generates data, applies Feast, materializes)
+kubectl apply -f manifests/05-dataprep-job.yaml
+
+# Run training job
+kubectl apply -f manifests/06-trainjob.yaml
 ```
 
-### Option B: Manual Setup via Workbench
+### Option B: Notebooks (Interactive)
 
-1. **Create Project** in OpenShift AI Dashboard → Data Science Projects
-2. **Create Workbench** with PyTorch image, Medium size, RWX storage (50Gi)
-3. **Clone this repo** and navigate to `examples/complete-mlops-pipeline/notebooks/`
-4. **Run notebooks** in order: `01-feast-features` → `02-training` → `03-inference`
+1. **Create Workbench** in OpenShift AI Dashboard (PyTorch image, 50Gi RWX storage)
+2. **Clone repo** and open `examples/complete-mlops-pipeline/notebooks/`
+3. **Run notebooks** in order:
+   - `01-feast-features.ipynb` → Setup Feast
+   - `02-training.ipynb` → Submit TrainJob
+   - `03-inference.ipynb` → Deploy model
 
 ## Pipeline Notebooks
 
-| Notebook | Description | Key Integrations |
-|----------|-------------|------------------|
-| `01-feast-features.ipynb` | Setup + Feature engineering | **Feast + Ray** |
-| `02-training.ipynb` | Model training with tracking | **Kubeflow + MLflow** |
-| `03-inference.ipynb` | Online inference | **Feast + Model** |
+| Notebook | What It Does | Feast Integration |
+|----------|--------------|-------------------|
+| `01-feast-features.ipynb` | Generate data, `feast apply`, materialize | Registers features to PostgreSQL |
+| `02-training.ipynb` | Submit TrainJob via Kubeflow SDK | **`get_historical_features()`** in TrainJob |
+| `03-inference.ipynb` | Deploy KServe + test inference | **Feast Server REST API** for online features |
 
-### Feast + Ray Flow
+### The Key Pattern: Feature Services
 
-![Feast Ray Integration](./docs/feast-ray.png)
+```python
+# features.py - Single source of truth
+training_features = FeatureService(
+    name="training_features",
+    features=[sales_history_features, store_external_features],
+)
 
-### Training Flow
+inference_features = FeatureService(
+    name="inference_features", 
+    features=[sales_history_features, store_external_features],
+)
+```
 
-![Training Sequence](./docs/training-flow.png)
+**Training (02-training.ipynb):**
+```python
+# Inside Kubeflow TrainJob
+training_df = store.get_historical_features(
+    entity_df=entity_df,
+    features=store.get_feature_service("training_features"),
+).to_df()
+```
 
-### Inference Flow
-
-![Inference Sequence](./docs/inference-flow.png)
+**Inference (03-inference.ipynb):**
+```python
+# Feast Server REST API call
+POST /get-online-features
+{"feature_service": "inference_features", "entities": {"store_id": [1], "dept_id": [5]}}
+```
 
 ## What You'll Learn
 
-### 1. Feast Feature Store
-- Configure Feast with PostgreSQL registry
-- Use Ray for distributed offline feature processing
-- Materialize features to online store for low-latency serving
+### 1. Feast ↔ Kubeflow Trainer Integration
+- Call `get_historical_features()` directly inside TrainJob
+- Use Feature Services for consistent feature selection
+- Share feature repository via PVC between Feast and Trainer
 
-### 2. Ray/KubeRay Integration
-- Connect to KubeRay cluster from notebooks
-- Distribute parquet processing across workers
-- Monitor jobs via Ray Dashboard
+### 2. Feast ↔ KServe Integration
+- Deploy Feast Feature Server alongside model
+- Fetch online features via REST API at inference time
+- Eliminate train-serve skew with shared feature definitions
 
 ### 3. Kubeflow Training Operator
-- Submit distributed PyTorch TrainJobs
-- Configure multi-node training
-- Use shared storage for checkpoints
+- Submit distributed PyTorch TrainJobs via SDK
+- Configure resources, volumes, and environment
+- Monitor job status and logs
 
 ### 4. MLflow Experiment Tracking
-- Log training metrics and parameters
-- Track model artifacts
-- Register models in model registry
+- Log metrics, parameters, and artifacts
+- Track model versions
+- Visualize training progress
 
 ## Configuration
 
-### Feast Feature Store
+### Ray Integration (Default: Enabled)
 
+Ray is **enabled by default** for production-scale distributed processing:
+
+| Toggle | Operation | Default | Disable For |
+|--------|-----------|---------|-------------|
+| `use_ray` | Training `get_historical_features()` | `true` | Quick start without Ray cluster |
+| `use_ray_dataprep` | DataPrep `feast materialize` | `true` | Small datasets (<1M rows) |
+
+**Quick Start (no Ray):** Set both to `false` for development/testing without a Ray cluster.
+
+**Production (default):** Both `true` - leverages KubeRay for distributed PIT joins and materialization.
+
+### Feast Two-Config Approach
+
+We use **two Feast configs** for stability + performance:
+
+| Config | Offline Store | Batch Engine | Used By |
+|--------|---------------|--------------|---------|
+| `feature_store.yaml` | `type: file` | Optional: `ray.engine` | `feast apply`, `materialize` |
+| `feature_store_ray.yaml` | `type: ray` | KubeRay | `get_historical_features()` in TrainJob |
+
+**`feature_store.yaml`** (File-based, for apply/materialize):
 ```yaml
 project: sales_forecasting
 provider: local
@@ -117,7 +214,7 @@ registry:
   path: postgresql+psycopg://feast:feast123@postgres:5432/feast
 
 offline_store:
-  type: ray  # Uses KubeRay cluster
+  type: file  # Stable for apply/materialize
 
 online_store:
   type: postgres
@@ -125,127 +222,194 @@ online_store:
   port: 5432
 ```
 
-### Kubeflow TrainJob
-
+**`feature_store_ray.yaml`** (KubeRay, for training):
 ```yaml
-apiVersion: trainer.kubeflow.org/v1alpha1
-kind: TrainJob
-spec:
-  trainer:
-    numNodes: 2
-    image: quay.io/modh/ray:2.52.1-py312-cu128
-    env:
-      - name: MLFLOW_TRACKING_URI
-        value: "http://mlflow:5000"
+project: sales_forecasting
+provider: local
+
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://feast:feast123@postgres:5432/feast
+
+offline_store:
+  type: ray
+  use_kuberay: true
+  kuberay_conf:
+    cluster_name: feast-ray
+    namespace: feast-trainer-demo
+    skip_tls: true
+  broadcast_join_threshold_mb: 100
+  enable_distributed_joins: true
+
+online_store:
+  type: postgres
+  host: postgres
+  port: 5432
 ```
 
-### MLflow Tracking
+### Kubeflow TrainJob with Feast + KubeRay
+
+Inside the TrainJob, we:
+1. Setup CodeFlare SDK auth (for KubeRay connection)
+2. Copy `feature_store_ray.yaml` → `feature_store.yaml`
+3. Call `get_historical_features()` which uses distributed Ray
 
 ```python
-import mlflow
-mlflow.set_tracking_uri("http://mlflow:5000")
-mlflow.set_experiment("sales-forecasting")
+# Inside TrainJob - setup KubeRay connection
+os.environ["FEAST_RAY_USE_KUBERAY"] = "true"
+os.environ["FEAST_RAY_CLUSTER_NAME"] = "feast-ray"
+os.environ["FEAST_RAY_NAMESPACE"] = "feast-trainer-demo"
+os.environ["FEAST_RAY_SKIP_TLS"] = "true"
 
-with mlflow.start_run():
-    mlflow.log_params({"epochs": 50, "lr": 0.001})
-    mlflow.log_metrics({"rmse": 1234.56, "mae": 890.12})
-    mlflow.pytorch.log_model(model, "model")
+# In-cluster auth for CodeFlare SDK
+with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+    os.environ["FEAST_RAY_AUTH_TOKEN"] = f.read()
+os.environ["FEAST_RAY_AUTH_SERVER"] = f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ['KUBERNETES_SERVICE_PORT']}"
+
+# Copy Ray config to feature_store.yaml
+shutil.copy(f"{feature_repo}/feature_store_ray.yaml", f"{feature_repo}/feature_store.yaml")
+
+# Now Feast uses KubeRay for distributed PIT joins!
+store = FeatureStore(repo_path=feature_repo)
+training_df = store.get_historical_features(
+    entity_df=entity_df,
+    features=store.get_feature_service("training_features"),
+).to_df()  # Distributed via KubeRay!
+```
+
+### Kubeflow Training SDK (from notebook)
+
+```python
+from kubeflow.training import TrainerClient, CustomTrainer
+
+trainer_client.train(
+    trainer=CustomTrainer(
+        func=train_sales_model,
+        num_nodes=1,
+        resources_per_node={"cpu": 4, "memory": "8Gi"},
+        # KubeRay integration requires feast[ray,postgres] + codeflare-sdk
+        packages_to_install=[
+            "feast[ray,postgres]==0.59.0",
+            "codeflare-sdk",  # For KubeRay connection
+            "mlflow>=3.0",
+        ],
+    ),
+    runtime=runtime,
+    parameters=parameters,
+)
 ```
 
 ## Validation
 
-This example has been validated with:
+Tested on OpenShift AI 3.2+ with NVIDIA GPUs:
 
-### Sales Forecasting - 4x NVIDIA GPU - Production Pattern
+| Configuration | Value |
+|---------------|-------|
+| **Dataset** | Synthetic Walmart sales (~5,000 rows) |
+| **Features** | 11 (lag_1..52, rolling_mean, store_size, temp, CPI, etc.) |
+| **Feast Config** | File offline store, PostgreSQL online store |
+| **Model** | MLP [512, 256, 128, 64] with BatchNorm + Dropout |
+| **Training** | 30 epochs, batch_size=64, lr=5e-4, AdamW |
+| **Distributed** | PyTorch DDP (1-4 GPUs) |
 
-* **Infrastructure:**
-  * OpenShift AI 2.19
-  * 4x NVIDIA GPU (A100/H100)
-  * 2x Ray workers
-  * NFS-CSI storage class
-  
-* **Configuration:**
-  ```yaml
-  # Data
-  dataset: Synthetic sales data (93,600 rows)
-  features: 10 (lag features, rolling stats, store attributes)
-  
-  # Feature Engineering (Feast + KubeRay)
-  offline_store: ray
-  online_store: postgres
-  compute_engine: KubeRay (2 workers)
-  
-  # Model
-  architecture: MLP (256 → 128 → 64 → 1)
-  dropout: 0.2
-  batch_norm: true
-  
-  # Training
-  epochs: 15
-  batch_size: 256
-  learning_rate: 1e-3
-  optimizer: AdamW
-  distributed: PyTorch DDP (4 GPUs)
-  ```
+**Results:**
+```
+✅ Best MAPE: ~10%
+✅ Best RMSE: ~2,500
+✅ Feast get_historical_features(): <2s for 5,000 rows
+✅ Feast online features: <10ms per request
+```
 
-* **Results:**
-  ```
-  ✅ Best MAPE: 2.3%
-  ✅ Best RMSE: 500
-  ✅ Best val_loss: 0.0009
-  ```
-
-* **Timing Breakdown:**
-  | Component | Duration |
-  |-----------|----------|
-  | Dataprep (Feast + KubeRay) | ~2 min 15s |
-  | Training (15 epochs, 4 GPU) | ~44s |
-  | **Total Pipeline** | **~3 min** |
-
-* **Metrics:**
-  ![](./docs/mlflow-metrics.png)
+**Timing (single GPU):**
+| Stage | Duration |
+|-------|----------|
+| Dataprep (generate + apply + materialize) | ~30s |
+| Training (30 epochs) | ~2 min |
+| **Total Pipeline** | **~2.5 min** |
 
 ## Directory Structure
 
 ```
 complete-mlops-pipeline/
-├── README.md                      # This file
-├── docs/                          # Screenshots and diagrams
+├── README.md
+├── feature_repo/
+│   ├── feature_store.yaml        # Feast configuration
+│   └── features.py               # Feature definitions (FeatureViews, Services)
 ├── notebooks/
-│   ├── 01-feast-features.ipynb   # Setup + Feature engineering (Feast + Ray)
-│   ├── 02-training.ipynb         # Model training (Kubeflow SDK + MLflow)
-│   └── 03-inference.ipynb        # Online inference (Feast + Model)
+│   ├── 01-feast-features.ipynb   # Feast setup (apply, materialize)
+│   ├── 02-training.ipynb         # TrainJob submission (Feast integration)
+│   └── 03-inference.ipynb        # KServe deployment (Feast online serving)
 ├── manifests/
-│   ├── 00-prereqs.yaml           # Namespace + ClusterTrainingRuntime
-│   ├── 01-postgres.yaml          # PostgreSQL (Red Hat certified)
+│   ├── 00-prereqs.yaml           # Namespace, ClusterTrainingRuntime
+│   ├── 01-postgres.yaml          # PostgreSQL (Feast + MLflow backend)
 │   ├── 02-mlflow.yaml            # MLflow tracking server
-│   ├── 03-raycluster.yaml           # KubeRay cluster
+│   ├── 03-raycluster.yaml        # KubeRay cluster (optional, for distributed)
 │   ├── 04-feast-prereqs.yaml     # PVC, ServiceAccount, RBAC
-│   ├── 05-dataprep-job.yaml      # Dataprep RayJob (Feast + KubeRay)
-│   └── 06-trainjob.yaml          # TrainJob with MLflow
+│   ├── 04b-feast-server.yaml     # Feast Feature Server (online serving)
+│   ├── 05-dataprep-job.yaml      # Data generation + feast apply + materialize
+│   └── 06-trainjob.yaml          # Kubeflow TrainJob (calls Feast)
 └── scripts/
-    ├── setup.sh                  # Automated setup (runs all manifests)
+    ├── serve.py                  # KServe inference server (calls Feast)
+    ├── setup.sh                  # Automated setup
     └── cleanup.sh                # Resource cleanup
 ```
 
 ## Troubleshooting
 
-### Ray Connection Issues
-```python
-os.environ["FEAST_RAY_SKIP_TLS"] = "true"
-os.environ["FEAST_RAY_USE_KUBERAY"] = "true"
+### KubeRay Connection Issues
+```bash
+# Check RayCluster is running
+kubectl get raycluster -n feast-trainer-demo
+kubectl get pods -l ray.io/cluster=feast-ray -n feast-trainer-demo
+
+# Check Ray head service
+kubectl get svc feast-ray-head-svc -n feast-trainer-demo
+
+# From TrainJob pod - test Ray connection
+kubectl exec -it <trainjob-pod> -n feast-trainer-demo -- \
+  python -c "import ray; ray.init('ray://feast-ray-head-svc:10001'); print(ray.cluster_resources())"
+```
+
+### Feast Registry Connection (in TrainJob)
+```bash
+# Check if TrainJob can reach PostgreSQL
+kubectl exec -it <trainjob-pod> -n feast-trainer-demo -- \
+  python -c "from feast import FeatureStore; print(FeatureStore('/shared/feature_repo').list_feature_views())"
+```
+
+### Feast Feature Server Issues
+```bash
+# Check Feast Server logs
+kubectl logs -l app=feast-server -n feast-trainer-demo
+
+# Test REST API
+kubectl exec -it <any-pod> -n feast-trainer-demo -- \
+  curl http://feast-server:6566/health
+```
+
+### TrainJob Not Starting
+```bash
+# Check TrainJob status
+kubectl get trainjob -n feast-trainer-demo
+kubectl describe trainjob sales-forecasting-mlflow -n feast-trainer-demo
+
+# Check for resource issues
+kubectl get events -n feast-trainer-demo --sort-by='.lastTimestamp'
 ```
 
 ### MLflow Connection Issues
 ```bash
-kubectl get pods -n feast-mlops-demo -l app=mlflow
-kubectl logs -l app=mlflow -n feast-mlops-demo
+kubectl logs -l app=mlflow -n feast-trainer-demo
 ```
 
-### Kubeflow TrainJob Pending
+### CodeFlare SDK Auth Issues
 ```bash
-kubectl describe trainjob <name> -n feast-mlops-demo
-kubectl get events -n feast-mlops-demo --sort-by='.lastTimestamp'
+# Check ServiceAccount token is mounted
+kubectl exec -it <trainjob-pod> -n feast-trainer-demo -- \
+  cat /var/run/secrets/kubernetes.io/serviceaccount/token | head -c 50
+
+# Check RBAC permissions
+kubectl auth can-i get rayclusters --as=system:serviceaccount:feast-trainer-demo:feast-sa -n feast-trainer-demo
 ```
 
 ## Resources
