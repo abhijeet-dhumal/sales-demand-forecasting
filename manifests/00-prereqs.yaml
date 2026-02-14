@@ -1,0 +1,14 @@
+# Prerequisites for MLOps Pipeline
+# Namespace only - uses built-in "torch-distributed" ClusterTrainingRuntime
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast-mlops
+
+# NOTE: No custom ClusterTrainingRuntime needed!
+# The notebooks use the built-in "torch-distributed" runtime and add
+# PVC mounts via PodTemplateOverrides in the TrainJob submission.
+# This is the recommended approach for portable, flexible training.

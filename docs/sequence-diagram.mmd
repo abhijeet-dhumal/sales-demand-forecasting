@@ -1,0 +1,97 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'actorBkg': '#e3f2fd',
+    'actorTextColor': '#1a1a1a',
+    'actorBorder': '#90caf9',
+    'signalColor': '#1a1a1a',
+    'signalTextColor': '#1a1a1a',
+    'labelBoxBkgColor': '#e8eaf6',
+    'labelTextColor': '#1a1a1a',
+    'loopTextColor': '#1a1a1a',
+    'noteBkgColor': '#fffde7',
+    'noteTextColor': '#1a1a1a',
+    'activationBkgColor': '#ffcc80',
+    'sequenceNumberColor': '#1a1a1a'
+  }
+}}%%
+
+sequenceDiagram
+    autonumber
+
+    participant DS as 👨‍🔬 Data Scientist
+    participant PVC as 💾 Shared PVC
+    participant Ray as ⚡ KubeRay
+    participant PG as 🐘 PostgreSQL
+    participant Feast as 🍕 Feast
+    participant KF as 🎯 Kubeflow
+    participant MLF as 📈 MLflow
+    participant KServe as 🚀 KServe
+
+    %% ==================== PHASE 1: FEATURE ENGINEERING ====================
+    rect rgb(227, 242, 253)
+        Note over DS,Feast: 📊 Phase 1: Feature Engineering (01-feast-features.ipynb)
+        
+        DS->>DS: Generate sales data (65K rows)
+        DS->>PVC: Save parquet files
+        
+        DS->>Feast: feast apply
+        activate Feast
+        Feast->>PG: Register entities, views, services
+        Feast-->>DS: ✓ Features registered
+        deactivate Feast
+        
+        DS->>Feast: feast materialize
+        activate Feast
+        Feast->>PG: Write to online store
+        Feast-->>DS: ✓ Materialization complete
+        deactivate Feast
+    end
+
+    %% ==================== PHASE 2: MODEL TRAINING ====================
+    rect rgb(255, 243, 224)
+        Note over DS,MLF: 🎯 Phase 2: Distributed Training (02-training.ipynb)
+        
+        DS->>KF: Submit TrainJob via SDK (2 nodes × 1 GPU)
+        activate KF
+        
+        KF->>Feast: get_historical_features()
+        activate Feast
+        Feast->>Ray: Distributed PIT joins
+        activate Ray
+        Ray->>PVC: Read parquet partitions
+        Ray-->>Feast: Training DataFrame
+        deactivate Ray
+        Feast-->>KF: Features (65K × 20 cols)
+        deactivate Feast
+        
+        KF->>KF: Train PyTorch MLP (DDP)
+        KF->>PVC: Save model.pt, scalers.joblib
+        KF->>MLF: Log metrics (MAPE ~3-5%)
+        
+        KF-->>DS: ✓ Training complete
+        deactivate KF
+    end
+
+    %% ==================== PHASE 3: INFERENCE ====================
+    rect rgb(232, 245, 233)
+        Note over DS,KServe: 🚀 Phase 3: Model Serving (03-inference.ipynb)
+        
+        DS->>KServe: Deploy InferenceService
+        activate KServe
+        KServe->>PVC: Load model + scalers
+        KServe-->>DS: ✓ Endpoint ready
+        deactivate KServe
+        
+        DS->>KServe: POST {store_id: 1, dept_id: 3}
+        activate KServe
+        KServe->>Feast: get_online_features()
+        Feast->>PG: Query (~5ms)
+        PG-->>Feast: Feature vector
+        Feast-->>KServe: 20 features
+        KServe->>KServe: Scale → Predict → Inverse
+        KServe-->>DS: {prediction: $107,197}
+        deactivate KServe
+    end
+
+    Note over Feast: 🔑 Same FeatureService for training & inference = Zero skew

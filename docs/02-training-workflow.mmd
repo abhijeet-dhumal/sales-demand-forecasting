@@ -1,0 +1,41 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e3f2fd',
+    'primaryTextColor': '#1a1a1a',
+    'primaryBorderColor': '#90caf9',
+    'lineColor': '#455a64'
+  }
+}}%%
+flowchart LR
+    A["📝 <b>Kubeflow SDK</b><br/><i>TrainerClient.train()</i>"]
+    B["🍕 <b>Feast + Ray</b><br/><i>get_historical_features()</i>"]
+    C["⚙️ <b>Preprocess</b><br/><i>Scale + Split</i>"]
+    D["🎯 <b>PyTorch DDP</b><br/><i>2 nodes × 1 GPU</i>"]
+    E["💾 <b>Save Model</b><br/><i>model.pt + scalers</i>"]
+    F["📈 <b>MLflow</b><br/><i>MAPE ~3-5%</i>"]
+    G["✅ <b>Done</b>"]
+
+    A -->|"submit"| B -->|"65K rows"| C -->|"tensors"| D -->|"best"| E -->|"log"| F --> G
+
+    KF["🎯 Kubeflow"]
+    Ray["⚡ KubeRay"]
+    PVC[("💾 Shared PVC")]
+    MLF["📈 MLflow"]
+
+    A -.->|"TrainJob"| KF
+    B -.->|"distribute"| Ray
+    E -.->|"save"| PVC
+    F -.->|"track"| MLF
+
+    style A fill:#e8f5e9,stroke:#81c784,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#90caf9,stroke-width:2px
+    style D fill:#fff3e0,stroke:#ffcc80,stroke-width:2px
+    style E fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px
+    style F fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px
+    style G fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
+    style KF fill:#fafafa,stroke:#bdbdbd
+    style Ray fill:#fafafa,stroke:#bdbdbd
+    style PVC fill:#fafafa,stroke:#bdbdbd
+    style MLF fill:#fafafa,stroke:#bdbdbd

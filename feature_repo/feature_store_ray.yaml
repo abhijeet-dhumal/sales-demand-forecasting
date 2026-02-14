@@ -1,0 +1,46 @@
+# Ray/KubeRay config for distributed get_historical_features()
+#
+# Used by TrainJob for distributed point-in-time joins.
+# The TrainJob copies this to feature_store.yaml before loading Feast.
+#
+# Prerequisites:
+# - RayCluster "feast-ray" running in same namespace
+# - ServiceAccount with RBAC to access RayCluster
+# - CodeFlare SDK auth environment variables set
+
+project: sales_forecasting
+provider: local
+
+registry:
+  registry_type: sql
+  path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+  cache_ttl_seconds: 60
+
+# Ray offline store - connects to KubeRay cluster
+offline_store:
+  type: ray
+  storage_path: /shared/data/ray_storage
+  use_kuberay: true
+  kuberay_conf:
+    cluster_name: feast-ray
+    namespace: feast-trainer-demo
+    skip_tls: true
+  broadcast_join_threshold_mb: 100
+  enable_distributed_joins: true
+  enable_ray_logging: true
+
+online_store:
+  type: postgres
+  host: postgres.feast-trainer-demo.svc.cluster.local
+  port: 5432
+  database: feast
+  user: feast
+  password: feast123
+
+entity_key_serialization_version: 3
+
+
+
+
+
+

@@ -1,0 +1,27 @@
+# Kustomize configuration for Sales Forecasting MLOps Pipeline
+#
+# Usage: kubectl apply -k manifests/
+#
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: feast-trainer-demo
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: sales-forecasting-mlops
+    includeSelectors: false
+
+resources:
+  - 00-prereqs.yaml      # Namespace, RBAC
+  - 01-postgres.yaml     # PostgreSQL (Feast + MLflow)
+  - 02-mlflow.yaml       # MLflow Server
+  - 03-raycluster.yaml   # KubeRay Cluster
+  - 04-feast-prereqs.yaml   # PVC, ServiceAccount
+  - 04b-feast-server.yaml   # Feast REST API
+
+# Jobs handled separately:
+# - 05-dataprep-job.yaml
+# - 06-trainjob.yaml
+# - 08-kserve-inference.yaml
+

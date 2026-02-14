@@ -1,0 +1,51 @@
+# KServe Inference - External Access Resources
+# 
+# NOTE: The InferenceService and ConfigMap are created by notebook 03-inference.ipynb
+# using the KServe SDK. This manifest only contains the external access resources.
+#
+# Apply AFTER running notebook 03 to enable external access:
+#   kubectl apply -f 08-kserve-inference.yaml
+#
+# Resources created by notebook 03 (NOT in this manifest):
+# - ConfigMap: sales-forecast-serve (serving script)
+# - InferenceService: sales-forecast (model serving)
+#
+# Resources in this manifest:
+# - Service: sales-forecast-external (non-headless for Route)
+# - Route: sales-forecast (OpenShift external access)
+---
+# Non-headless service for Route (KServe creates headless service by default)
+apiVersion: v1
+kind: Service
+metadata:
+  name: sales-forecast-external
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: sales-forecast
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# OpenShift Route for external access
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+spec:
+  to:
+    kind: Service
+    name: sales-forecast-external
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
