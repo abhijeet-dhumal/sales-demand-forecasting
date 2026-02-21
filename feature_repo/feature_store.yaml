@@ -1,30 +1,25 @@
 # Feast Feature Store Configuration
-# For feast apply and materialize (file-based offline store)
 #
-# NAMESPACE: feast-trainer-demo
-#
-# Architecture:
-# - Registry: PostgreSQL (SQL-queryable)
-# - Offline Store: File (Parquet) - for apply/materialize
+# Shared infrastructure:
+# - Registry: PostgreSQL (feast-trainer-demo namespace)
+# - Offline Store: File-based (Parquet on shared PVC)
 # - Online Store: PostgreSQL (low-latency serving)
 #
-# NOTE: For distributed training with Ray, use feature_store_ray.yaml
+# Data paths are auto-detected by features.py:
+# - Workbench: /opt/app-root/src/shared/data/
+# - Pods: /shared/data/
 
 project: sales_forecasting
-
 provider: local
 
-# PostgreSQL registry for feature definitions
 registry:
   registry_type: sql
   path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
   cache_ttl_seconds: 60
 
-# File-based offline store (for feast apply/materialize)
 offline_store:
   type: file
 
-# PostgreSQL online store for low-latency serving
 online_store:
   type: postgres
   host: postgres.feast-trainer-demo.svc.cluster.local

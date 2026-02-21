@@ -1,12 +1,18 @@
-# Ray/KubeRay config for distributed get_historical_features()
+# Ray Configuration for Feast (KubeRay + CodeFlare SDK)
 #
-# Used by TrainJob for distributed point-in-time joins.
-# The TrainJob copies this to feature_store.yaml before loading Feast.
+# This config enables:
+# - Ray offline store for distributed get_historical_features()
+# - Ray batch engine for distributed materialization
 #
 # Prerequisites:
-# - RayCluster "feast-ray" running in same namespace
-# - ServiceAccount with RBAC to access RayCluster
-# - CodeFlare SDK auth environment variables set
+# - RayCluster "feast-ray" running in feast-trainer-demo namespace
+# - PostgreSQL for registry and online store
+# - Shared PVC mounted at /shared
+#
+# Authentication (set before running feast commands):
+#   export FEAST_RAY_AUTH_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+#   export FEAST_RAY_AUTH_SERVER=https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}
+#   export FEAST_RAY_SKIP_TLS=true
 
 project: sales_forecasting
 provider: local
@@ -16,7 +22,7 @@ registry:
   path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
   cache_ttl_seconds: 60
 
-# Ray offline store - connects to KubeRay cluster
+# Ray offline store for distributed get_historical_features()
 offline_store:
   type: ray
   storage_path: /shared/data/ray_storage
@@ -29,6 +35,15 @@ offline_store:
   enable_distributed_joins: true
   enable_ray_logging: true
 
+# Ray batch engine for distributed materialization
+batch_engine:
+  type: ray.engine
+  use_kuberay: true
+  kuberay_conf:
+    cluster_name: feast-ray
+    namespace: feast-trainer-demo
+    skip_tls: true
+
 online_store:
   type: postgres
   host: postgres.feast-trainer-demo.svc.cluster.local
@@ -38,9 +53,3 @@ online_store:
   password: feast123
 
 entity_key_serialization_version: 3
-
-
-
-
-
-

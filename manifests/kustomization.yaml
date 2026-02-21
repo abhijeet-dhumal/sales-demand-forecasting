@@ -20,7 +20,7 @@ resources:
 # Infrastructure (apply in order)
 - 00-prereqs.yaml        # Namespace
 - 01-postgres.yaml       # PostgreSQL
-- 02-mlflow.yaml         # MinIO (MLflow CRD applied separately)
+- 02-mlflow.yaml         # MLflow server (experiment tracking)
 - 03-raycluster.yaml     # KubeRay cluster
 - 04a-feast-rbac.yaml    # RBAC for Feast/Ray
 - 04b-feast-server.yaml  # Feast server + UI

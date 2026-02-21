@@ -1,205 +1,141 @@
-# MLflow - RHOAI Native with PostgreSQL + MinIO
+# MLflow Server for Experiment Tracking
+#
+# Uses:
+# - PostgreSQL backend for tracking data (metrics, params, runs)
+# - Shared PVC for artifact storage (models, plots, etc.)
+#
+# No MinIO required - artifacts stored directly on shared PVC
 #
 # =============================================================================
-# SETUP (One-time, in order)
+# SETUP (after deploying with kubectl apply -k manifests/)
 # =============================================================================
 #
-# 1. Enable MLflow Operator:
-#    kubectl patch datasciencecluster default-dsc --type=merge \
-#      -p '{"spec":{"components":{"mlflowoperator":{"managementState":"Managed"}}}}'
-#
-# 2. Create MLflow database (after postgres-init job completes):
+# 1. Create MLflow database:
 #    kubectl exec -n feast-trainer-demo deploy/postgres -- \
 #      psql -U postgres -c "CREATE DATABASE mlflow OWNER feast;"
 #
-# 3. Apply kustomize (includes MinIO below):
-#    kubectl apply -k manifests/
-#
-# 4. Create MinIO bucket (after MinIO starts):
-#    kubectl exec -n feast-trainer-demo deploy/minio -- mkdir -p /data/mlflow
-#
-# 5. Create MLflow secrets in operator namespace:
-#    kubectl apply -f - <<EOF
-#    apiVersion: v1
-#    kind: Secret
-#    metadata:
-#      name: mlflow-postgres-secret
-#      namespace: redhat-ods-applications
-#    type: Opaque
-#    stringData:
-#      uri: "postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/mlflow"
-#    ---
-#    apiVersion: v1
-#    kind: Secret
-#    metadata:
-#      name: mlflow-s3-secret
-#      namespace: redhat-ods-applications
-#    type: Opaque
-#    stringData:
-#      AWS_ACCESS_KEY_ID: minio
-#      AWS_SECRET_ACCESS_KEY: minio123
-#      MLFLOW_S3_ENDPOINT_URL: http://minio.feast-trainer-demo.svc.cluster.local:9000
-#    EOF
-#
-# 6. Create MLflow CRD:
-#    kubectl apply -f - <<EOF
-#    apiVersion: mlflow.opendatahub.io/v1
-#    kind: MLflow
-#    metadata:
-#      name: mlflow
-#    spec:
-#      backendStoreUriFrom:
-#        name: mlflow-postgres-secret
-#        key: uri
-#      artifactsDestination: "s3://mlflow/artifacts"
-#      serveArtifacts: true
-#      envFrom:
-#      - secretRef:
-#          name: mlflow-s3-secret
-#      resources:
-#        requests:
-#          cpu: 500m
-#          memory: 1Gi
-#        limits:
-#          cpu: 2
-#          memory: 4Gi
-#    EOF
-#
-# 7. Create direct route (bypasses gateway TLS issue):
-#    kubectl apply -f - <<EOF
-#    apiVersion: route.openshift.io/v1
-#    kind: Route
-#    metadata:
-#      name: mlflow-direct
-#      namespace: redhat-ods-applications
-#    spec:
-#      host: mlflow-direct.apps.YOUR-CLUSTER.com
-#      port:
-#        targetPort: 8443
-#      tls:
-#        termination: reencrypt
-#      to:
-#        kind: Service
-#        name: mlflow
-#    EOF
+# 2. Restart MLflow to pick up the database:
+#    kubectl rollout restart deploy/mlflow -n feast-trainer-demo
 #
 # =============================================================================
-# MinIO - S3-compatible artifact storage (deployed via kustomize)
-# =============================================================================
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: minio-secret
-  namespace: feast-trainer-demo
-type: Opaque
-stringData:
-  accesskey: minio
-  secretkey: minio123
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: mlflow
   namespace: feast-trainer-demo
+  labels:
+    app: mlflow
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: minio
+      app: mlflow
   template:
     metadata:
       labels:
-        app: minio
+        app: mlflow
     spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2025a-20250109
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "Waiting for PostgreSQL..."
+          for i in {1..30}; do
+            if pg_isready -h postgres.feast-trainer-demo.svc.cluster.local -U feast -d mlflow 2>/dev/null; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          echo "Warning: PostgreSQL may not be ready, proceeding anyway"
       containers:
-      - name: minio
-        image: quay.io/minio/minio:latest
-        args: ["server", "/data", "--console-address", ":9001"]
-        env:
-        - name: MINIO_ROOT_USER
-          valueFrom:
-            secretKeyRef:
-              name: minio-secret
-              key: accesskey
-        - name: MINIO_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: minio-secret
-              key: secretkey
+      - name: mlflow
+        image: quay.io/modh/mlflow-server:v2.20.2-rhoai-24
+        args:
+        - mlflow
+        - server
+        - --host=0.0.0.0
+        - --port=5000
+        - --backend-store-uri=postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/mlflow
+        - --default-artifact-root=/shared/mlflow-artifacts
+        - --serve-artifacts
         ports:
-        - containerPort: 9000
-          name: api
-        - containerPort: 9001
-          name: console
+        - containerPort: 5000
+          name: http
         volumeMounts:
-        - name: data
-          mountPath: /data
-          subPath: minio-data
+        - name: shared-storage
+          mountPath: /shared
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
+            cpu: 200m
+            memory: 512Mi
           limits:
             cpu: 1
-            memory: 1Gi
-        lifecycle:
-          postStart:
-            exec:
-              command:
-              - /bin/sh
-              - -c
-              - |
-                sleep 5
-                mc alias set local http://localhost:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
-                mc mb local/mlflow --ignore-existing
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 30
       volumes:
-      - name: data
+      - name: shared-storage
         persistentVolumeClaim:
           claimName: shared
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
+  name: mlflow
   namespace: feast-trainer-demo
+  labels:
+    app: mlflow
 spec:
   selector:
-    app: minio
+    app: mlflow
   ports:
-  - name: api
-    port: 9000
-  - name: console
-    port: 9001
+  - name: http
+    port: 5000
+    targetPort: 5000
 ---
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: minio-console
+  name: mlflow
   namespace: feast-trainer-demo
 spec:
   to:
     kind: Service
-    name: minio
+    name: mlflow
   port:
-    targetPort: console
+    targetPort: http
   tls:
     termination: edge
 #
 # =============================================================================
-# ACCESS URLs
+# ACCESS URLs (after deployment)
 # =============================================================================
 #
-# MLflow UI:     https://mlflow-direct.apps.YOUR-CLUSTER.com/mlflow/
-# MinIO Console: https://minio-console-feast-trainer-demo.apps.YOUR-CLUSTER.com
+# MLflow UI: https://mlflow-feast-trainer-demo.apps.<cluster>/
 #
 # =============================================================================
-# SDK Configuration (notebooks/training)
+# SDK Configuration
 # =============================================================================
 #
-# MLFLOW_TRACKING_URI=https://mlflow-direct.apps.YOUR-CLUSTER.com/mlflow
-# MLFLOW_WORKSPACE=feast-trainer-demo
-# MLFLOW_TRACKING_TOKEN=$(oc whoami --show-token)
-# MLFLOW_TRACKING_INSECURE_TLS=true
+# In-cluster (training jobs):
+#   MLFLOW_TRACKING_URI=http://mlflow.feast-trainer-demo.svc.cluster.local:5000
 #
-# pip install "git+https://github.com/red-hat-data-services/mlflow@master"
+# External (notebooks via workbench):
+#   MLFLOW_TRACKING_URI=https://mlflow-feast-trainer-demo.apps.<cluster>/
+#

@@ -1,6 +1,7 @@
 # Feast Feature Server - REST API for online features
+# Uses shared PVC for data access and PostgreSQL for registry/online store
 ---
-# ConfigMap for feature_store.yaml (matches feature_repo/feature_store.yaml)
+# ConfigMap with feature_store.yaml and features.py
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,6 +26,116 @@ data:
       user: feast
       password: feast123
     entity_key_serialization_version: 3
+  features.py: |
+    import os
+    from datetime import timedelta
+    from feast import Entity, FeatureView, Field, FileSource, FeatureService
+    from feast.types import Float32, Int32, String
+    from feast.value_type import ValueType
+    
+    # =============================================================================
+    # CODEFLARE SDK AUTHENTICATION (auto-configure from in-cluster service account)
+    # =============================================================================
+    def _setup_ray_auth():
+        if os.environ.get("FEAST_RAY_AUTH_TOKEN"):
+            return
+        token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        if os.path.exists(token_path):
+            with open(token_path) as f:
+                os.environ["FEAST_RAY_AUTH_TOKEN"] = f.read().strip()
+        if not os.environ.get("FEAST_RAY_AUTH_SERVER"):
+            k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST")
+            k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+            if k8s_host:
+                os.environ["FEAST_RAY_AUTH_SERVER"] = f"https://{k8s_host}:{k8s_port}"
+        if not os.environ.get("FEAST_RAY_SKIP_TLS"):
+            os.environ["FEAST_RAY_SKIP_TLS"] = "true"
+    
+    _setup_ray_auth()
+
+    # Entities
+    store_entity = Entity(name="store_id", join_keys=["store_id"], value_type=ValueType.INT32)
+    dept_entity = Entity(name="dept_id", join_keys=["dept_id"], value_type=ValueType.INT32)
+
+    # Data sources - use /shared mount (shared PVC)
+    _DATA_ROOT = os.environ.get("FEAST_DATA_ROOT", "/shared/data")
+    
+    sales_source = FileSource(
+        path=f"{_DATA_ROOT}/sales_features.parquet",
+        timestamp_field="event_timestamp",
+    )
+    store_source = FileSource(
+        path=f"{_DATA_ROOT}/store_features.parquet",
+        timestamp_field="event_timestamp",
+    )
+
+    # Feature Views
+    sales_features = FeatureView(
+        name="sales_features",
+        entities=[store_entity, dept_entity],
+        ttl=timedelta(days=90),
+        schema=[
+            Field(name="weekly_sales", dtype=Float32),
+            Field(name="lag_1", dtype=Float32),
+            Field(name="lag_2", dtype=Float32),
+            Field(name="lag_4", dtype=Float32),
+            Field(name="lag_8", dtype=Float32),
+            Field(name="rolling_mean_4w", dtype=Float32),
+            Field(name="rolling_std_4w", dtype=Float32),
+            Field(name="sales_vs_avg", dtype=Float32),
+            Field(name="week_of_year", dtype=Int32),
+            Field(name="month", dtype=Int32),
+            Field(name="quarter", dtype=Int32),
+            Field(name="week_of_month", dtype=Int32),
+            Field(name="is_month_end", dtype=Int32),
+            Field(name="is_holiday", dtype=Int32),
+            Field(name="days_to_holiday", dtype=Int32),
+            Field(name="temperature", dtype=Float32),
+            Field(name="fuel_price", dtype=Float32),
+            Field(name="cpi", dtype=Float32),
+            Field(name="unemployment", dtype=Float32),
+        ],
+        source=sales_source,
+        online=True,
+    )
+
+    store_features = FeatureView(
+        name="store_features",
+        entities=[store_entity, dept_entity],
+        ttl=timedelta(days=365),
+        schema=[
+            Field(name="store_type", dtype=String),
+            Field(name="store_size", dtype=Int32),
+            Field(name="region", dtype=String),
+        ],
+        source=store_source,
+        online=True,
+    )
+
+    # Feature Services
+    training_features = FeatureService(
+        name="training_features",
+        features=[
+            sales_features[["weekly_sales", "lag_1", "lag_2", "lag_4", "lag_8",
+                           "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+                           "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+                           "is_holiday", "days_to_holiday",
+                           "temperature", "fuel_price", "cpi", "unemployment"]],
+            store_features[["store_type", "store_size", "region"]],
+        ],
+    )
+
+    inference_features = FeatureService(
+        name="inference_features",
+        features=[
+            sales_features[["lag_1", "lag_2", "lag_4", "lag_8",
+                           "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+                           "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
+                           "is_holiday", "days_to_holiday",
+                           "temperature", "fuel_price", "cpi", "unemployment"]],
+            store_features[["store_type", "store_size", "region"]],
+        ],
+    )
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,6 +195,8 @@ spec:
           mountPath: /pylibs
         - name: feast-config
           mountPath: /feast
+        - name: shared
+          mountPath: /shared
         readinessProbe:
           httpGet:
             path: /health
@@ -102,6 +215,9 @@ spec:
       - name: feast-config
         configMap:
           name: feast-config
+      - name: shared
+        persistentVolumeClaim:
+          claimName: shared
 ---
 apiVersion: v1
 kind: Service
@@ -186,12 +302,17 @@ spec:
           mountPath: /pylibs
         - name: feast-config
           mountPath: /feast
+        - name: shared
+          mountPath: /shared
       volumes:
       - name: pylibs
         emptyDir: {}
       - name: feast-config
         configMap:
           name: feast-config
+      - name: shared
+        persistentVolumeClaim:
+          claimName: shared
 ---
 apiVersion: v1
 kind: Service

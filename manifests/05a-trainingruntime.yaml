@@ -1,0 +1,51 @@
+# TrainingRuntime with shared storage and Ray TLS certificates
+#
+# This runtime provides:
+# - PyTorch DDP with GPU support
+# - Shared PVC at /shared
+# - Ray TLS certificates mounted at /ray-tls
+#
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainingRuntime
+metadata:
+  name: torch-with-ray-tls
+  namespace: feast-trainer-demo
+spec:
+  mlPolicy:
+    numNodes: 2
+    torch:
+      numProcPerNode: 1
+  template:
+    spec:
+      replicatedJobs:
+      - name: node
+        template:
+          spec:
+            parallelism: 1
+            completions: 1
+            template:
+              spec:
+                serviceAccountName: feast-sa
+                containers:
+                - name: trainer
+                  image: quay.io/modh/training:py312-cuda128-torch280
+                  volumeMounts:
+                  - name: shared-storage
+                    mountPath: /shared
+                  - name: ray-tls
+                    mountPath: /ray-tls
+                    readOnly: true
+                  - name: dshm
+                    mountPath: /dev/shm
+                volumes:
+                - name: shared-storage
+                  persistentVolumeClaim:
+                    claimName: shared
+                - name: ray-tls
+                  secret:
+                    secretName: ray-worker-secret-feast-ray
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 4Gi
+                restartPolicy: OnFailure

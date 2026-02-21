@@ -137,6 +137,8 @@ data:
   # FOR BIG DATA (>1M rows): Uncomment batch_engine section below to enable
   # distributed materialization via Ray cluster
   feature_store.yaml: |
+    # Ray Configuration for Feast (KubeRay + CodeFlare SDK)
+    # Auth is auto-configured by features.py from service account token
     project: sales_forecasting
     provider: local
     
@@ -145,9 +147,27 @@ data:
       path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
       cache_ttl_seconds: 60
     
-    # File-based offline store (stable for apply/materialize)
+    # Ray offline store for distributed operations
     offline_store:
-      type: file
+      type: ray
+      storage_path: /shared/data/ray_storage
+      use_kuberay: true
+      kuberay_conf:
+        cluster_name: feast-ray
+        namespace: feast-trainer-demo
+        skip_tls: true
+      broadcast_join_threshold_mb: 100
+      enable_distributed_joins: true
+      enable_ray_logging: false
+    
+    # Ray batch engine for distributed materialization
+    batch_engine:
+      type: ray.engine
+      use_kuberay: true
+      kuberay_conf:
+        cluster_name: feast-ray
+        namespace: feast-trainer-demo
+        skip_tls: true
     
     # PostgreSQL online store for low-latency serving
     online_store:
@@ -158,17 +178,10 @@ data:
       user: feast
       password: feast123
     
-    # =========================================================================
-    # Ray batch_engine for distributed materialization (enabled by default)
-    # Comment out below for quick start without Ray cluster
-    # =========================================================================
-    batch_engine:
-      type: ray.engine
-      ray_address: ray://feast-ray-head-svc.feast-trainer-demo.svc.cluster.local:10001
-    
     entity_key_serialization_version: 3
   
-  # Ray-enabled config (used by Training Job for get_historical_features)
+  # Ray-enabled config (same as feature_store.yaml - unified config)
+  # Auth is auto-configured by features.py from service account token
   feature_store_ray.yaml: |
     project: sales_forecasting
     provider: local
@@ -178,18 +191,27 @@ data:
       path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
       cache_ttl_seconds: 60
     
-    # Ray offline store in KubeRay mode (for distributed historical retrieval)
+    # Ray offline store for distributed operations
     offline_store:
       type: ray
       storage_path: /shared/data/ray_storage
       use_kuberay: true
       kuberay_conf:
-        cluster_name: "feast-ray"
-        namespace: "feast-trainer-demo"
+        cluster_name: feast-ray
+        namespace: feast-trainer-demo
         skip_tls: true
       broadcast_join_threshold_mb: 100
       enable_distributed_joins: true
-      enable_ray_logging: true
+      enable_ray_logging: false
+    
+    # Ray batch engine for distributed materialization
+    batch_engine:
+      type: ray.engine
+      use_kuberay: true
+      kuberay_conf:
+        cluster_name: feast-ray
+        namespace: feast-trainer-demo
+        skip_tls: true
     
     online_store:
       type: postgres
@@ -202,7 +224,7 @@ data:
     entity_key_serialization_version: 3
 
   # Optimized Feature Definitions for Sales Forecasting
-  # v2 - High-impact features, no lag_52 (causes data loss)
+  # v2 - High-impact features with auto-auth for CodeFlare SDK
   features.py: |
     """
     Optimized Feature Definitions for Sales Forecasting
@@ -214,14 +236,36 @@ data:
     - Holiday (10%): is_holiday, days_to_holiday
     - Economic (7%): temperature, fuel_price, cpi, unemployment
     """
+    import os
     from datetime import timedelta
     from feast import Entity, FeatureView, Field, FileSource, FeatureService
     from feast.on_demand_feature_view import on_demand_feature_view
     from feast.types import Float32, Float64, Int32, Int64, String
+    from feast.value_type import ValueType
+    
+    # =============================================================================
+    # CODEFLARE SDK AUTHENTICATION (auto-configure from in-cluster service account)
+    # =============================================================================
+    def _setup_ray_auth():
+        if os.environ.get("FEAST_RAY_AUTH_TOKEN"):
+            return
+        token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        if os.path.exists(token_path):
+            with open(token_path) as f:
+                os.environ["FEAST_RAY_AUTH_TOKEN"] = f.read().strip()
+        if not os.environ.get("FEAST_RAY_AUTH_SERVER"):
+            k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST")
+            k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+            if k8s_host:
+                os.environ["FEAST_RAY_AUTH_SERVER"] = f"https://{k8s_host}:{k8s_port}"
+        if not os.environ.get("FEAST_RAY_SKIP_TLS"):
+            os.environ["FEAST_RAY_SKIP_TLS"] = "true"
+    
+    _setup_ray_auth()
     
     # Entities
-    store = Entity(name="store_id", join_keys=["store_id"], description="Store identifier")
-    department = Entity(name="dept_id", join_keys=["dept_id"], description="Department identifier")
+    store = Entity(name="store_id", join_keys=["store_id"], value_type=ValueType.INT32, description="Store identifier")
+    department = Entity(name="dept_id", join_keys=["dept_id"], value_type=ValueType.INT32, description="Department identifier")
     
     # Sales features - optimized schema (pre-sorted for fast PIT joins)
     sales_features = FeatureView(
@@ -544,13 +588,13 @@ data:
     mkdir -p "$DATA_DIR/saved_datasets"
     # Clean up stale files
     rm -f "$FEATURE_REPO"/*.py "$FEATURE_REPO"/*.yaml 2>/dev/null || true
-    # Copy Feast configs and features
-    cp /scripts/feature_store.yaml "$FEATURE_REPO/"           # File-based (for apply/materialize)
-    cp /scripts/feature_store_ray.yaml "$FEATURE_REPO/"       # Ray-enabled (for training)
-    cp /scripts/features.py "$FEATURE_REPO/"
+    # Copy Feast configs and features (unified Ray config with auto-auth)
+    cp /scripts/feature_store.yaml "$FEATURE_REPO/"           # Ray-enabled (KubeRay + CodeFlare)
+    cp /scripts/feature_store_ray.yaml "$FEATURE_REPO/"       # Same config (for compatibility)
+    cp /scripts/features.py "$FEATURE_REPO/"                  # Includes auto-auth setup
     echo "   ✅ Project: $FEATURE_REPO"
-    echo "   📁 Config: feature_store.yaml (file-based)"
-    echo "   📁 Config: feature_store_ray.yaml (Ray/KubeRay)"
+    echo "   📁 Config: feature_store.yaml (Ray + KubeRay + CodeFlare SDK)"
+    echo "   🔐 Auth: Auto-configured from service account token"
     
     # Step 3: Apply features
     echo ""

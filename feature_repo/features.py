@@ -5,9 +5,9 @@ This module defines Feast feature store resources for the Walmart-style sales fo
 
 Architecture:
 - Registry: PostgreSQL (SQL-queryable)
-- Offline Store: File-based (Parquet) for apply/materialize
+- Offline Store: Ray (distributed PIT joins via KubeRay)
 - Online Store: PostgreSQL (low-latency serving)
-- Compute Engine: Ray (distributed get_historical_features)
+- Compute Engine: Ray (distributed get_historical_features + materialize)
 
 Entities:
 - store_id: Store identifier (1-45)
@@ -30,9 +30,44 @@ Feature Importance (typical retail forecasting):
 - Store features      :  2% - Store context
 """
 
+import os
 from datetime import timedelta
 from feast import Entity, FeatureView, Field, FileSource, FeatureService
 from feast.types import Float32, Int32, String
+from feast.value_type import ValueType
+
+
+# =============================================================================
+# CODEFLARE SDK AUTHENTICATION (for KubeRay)
+# =============================================================================
+# Auto-configure auth from in-cluster service account token
+# This runs when features.py is loaded by Feast
+
+def _setup_ray_auth():
+    """Setup CodeFlare SDK authentication from in-cluster service account."""
+    # Skip if already configured
+    if os.environ.get("FEAST_RAY_AUTH_TOKEN"):
+        return
+    
+    # Read service account token
+    token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    if os.path.exists(token_path):
+        with open(token_path) as f:
+            os.environ["FEAST_RAY_AUTH_TOKEN"] = f.read().strip()
+    
+    # Get API server from environment or construct from cluster info
+    if not os.environ.get("FEAST_RAY_AUTH_SERVER"):
+        # Try to get from KUBERNETES_SERVICE_HOST
+        k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST")
+        k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+        if k8s_host:
+            os.environ["FEAST_RAY_AUTH_SERVER"] = f"https://{k8s_host}:{k8s_port}"
+    
+    # Skip TLS verification for internal cluster communication
+    if not os.environ.get("FEAST_RAY_SKIP_TLS"):
+        os.environ["FEAST_RAY_SKIP_TLS"] = "true"
+
+_setup_ray_auth()
 
 
 # =============================================================================
@@ -43,6 +78,7 @@ store_entity = Entity(
     name="store_id",
     description="Store identifier (1-45)",
     join_keys=["store_id"],
+    value_type=ValueType.INT32,
     tags={"team": "sales", "priority": "high"},
 )
 
@@ -50,6 +86,7 @@ dept_entity = Entity(
     name="dept_id",
     description="Department identifier (1-10)",
     join_keys=["dept_id"],
+    value_type=ValueType.INT32,
     tags={"team": "sales"},
 )
 
@@ -61,7 +98,6 @@ dept_entity = Entity(
 #   - RHOAI Workbench: /opt/app-root/src/shared/data/
 #   - TrainJob/Pods:   /shared/data/
 
-import os
 # Auto-detect mount path: /shared (TrainJob/Ray) vs /opt/app-root/src/shared (Workbench)
 def _get_data_root():
     if os.environ.get("FEAST_DATA_ROOT"):

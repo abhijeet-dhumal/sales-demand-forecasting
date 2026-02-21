@@ -8,6 +8,9 @@ metadata:
   labels:
     app: feast-ray
     ray.io/cluster: feast-ray
+  annotations:
+    # Disable mTLS for external connections (training pods, workbench)
+    odh.ray.io/secure-trusted-network: "false"
 spec:
   rayVersion: '2.52.1'
   enableInTreeAutoscaling: false
