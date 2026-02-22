@@ -1,0 +1,131 @@
+# Resource Management & Network Policies
+#
+# Best practices using built-in Kubernetes resources (no external dependencies):
+# - ResourceQuota: Prevent resource abuse in namespace
+# - LimitRange: Default resource limits for pods
+# - NetworkPolicy: Microsegmentation between components
+# - PodDisruptionBudget: Availability during node maintenance
+#
+---
+# Resource Quota - Limit total namespace resources
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-quota
+  namespace: feast-trainer-demo
+spec:
+  hard:
+    requests.cpu: "32"
+    requests.memory: "64Gi"
+    limits.cpu: "64"
+    limits.memory: "128Gi"
+    persistentvolumeclaims: "10"
+    pods: "50"
+---
+# Limit Range - Default limits for containers without explicit limits
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: feast-trainer-demo
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "1"
+      memory: "2Gi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "256Mi"
+    max:
+      cpu: "16"
+      memory: "32Gi"
+---
+# Network Policy - PostgreSQL only accepts traffic from namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-policy
+  namespace: feast-trainer-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+# Network Policy - MLflow accepts from namespace + OpenShift routes
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlflow-policy
+  namespace: feast-trainer-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: mlflow
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          network.openshift.io/policy-group: ingress
+    ports:
+    - protocol: TCP
+      port: 5000
+---
+# Network Policy - Feast server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: feast-policy
+  namespace: feast-trainer-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: feast-server
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          network.openshift.io/policy-group: ingress
+    ports:
+    - protocol: TCP
+      port: 6566
+    - protocol: TCP
+      port: 8888
+---
+# PodDisruptionBudget - Keep PostgreSQL available during maintenance
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: feast-trainer-demo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgres
+---
+# PodDisruptionBudget - Keep MLflow available during maintenance
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mlflow-pdb
+  namespace: feast-trainer-demo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: mlflow

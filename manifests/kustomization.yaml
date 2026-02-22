@@ -18,14 +18,24 @@ labels:
 
 resources:
 # Infrastructure (apply in order)
-- 00-prereqs.yaml        # Namespace
+- 00-prereqs.yaml        # Namespace + shared PVC
+- 00a-config.yaml        # Centralized configuration
 - 01-postgres.yaml       # PostgreSQL
-- 02-mlflow.yaml         # MLflow server (experiment tracking)
+- 02-mlflow.yaml         # Standalone MLflow server
 - 03-raycluster.yaml     # KubeRay cluster
 - 04a-feast-rbac.yaml    # RBAC for Feast/Ray
 - 04b-feast-server.yaml  # Feast server + UI
+- 07-observability.yaml  # Quotas, NetworkPolicies, PDBs, Monitoring
 
 # Jobs (apply separately after infrastructure is ready):
-# - 05-dataprep-job.yaml
-# - 06-trainjob.yaml (or submit via notebook)
+# - 05-dataprep-job.yaml   (make dataprep)
+# - 06-trainjob.yaml       (make train)
 # - 08-kserve-inference.yaml
+
+# ConfigMaps generated from files
+configMapGenerator:
+- name: training-scripts
+  files:
+  - scripts/train_ddp.py
+  options:
+    disableNameSuffixHash: true

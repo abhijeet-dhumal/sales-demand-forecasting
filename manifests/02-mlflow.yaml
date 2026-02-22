@@ -1,21 +1,8 @@
 # MLflow Server for Experiment Tracking
 #
-# Uses:
-# - PostgreSQL backend for tracking data (metrics, params, runs)
+# Configuration:
+# - PostgreSQL backend for tracking data (experiments, runs, metrics)
 # - Shared PVC for artifact storage (models, plots, etc.)
-#
-# No MinIO required - artifacts stored directly on shared PVC
-#
-# =============================================================================
-# SETUP (after deploying with kubectl apply -k manifests/)
-# =============================================================================
-#
-# 1. Create MLflow database:
-#    kubectl exec -n feast-trainer-demo deploy/postgres -- \
-#      psql -U postgres -c "CREATE DATABASE mlflow OWNER feast;"
-#
-# 2. Restart MLflow to pick up the database:
-#    kubectl rollout restart deploy/mlflow -n feast-trainer-demo
 #
 # =============================================================================
 ---
@@ -37,33 +24,48 @@ spec:
         app: mlflow
     spec:
       initContainers:
-      - name: wait-for-postgres
-        image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2025a-20250109
+      - name: create-dirs
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /shared/models"]
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /shared
+      containers:
+      - name: mlflow
+        image: ghcr.io/mlflow/mlflow:v2.19.0
+        env:
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: PGHOST
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: host
+        - name: PGPORT
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: port
         command:
         - /bin/bash
         - -c
         - |
-          echo "Waiting for PostgreSQL..."
-          for i in {1..30}; do
-            if pg_isready -h postgres.feast-trainer-demo.svc.cluster.local -U feast -d mlflow 2>/dev/null; then
-              echo "PostgreSQL is ready"
-              exit 0
-            fi
-            echo "Waiting... ($i/30)"
-            sleep 2
-          done
-          echo "Warning: PostgreSQL may not be ready, proceeding anyway"
-      containers:
-      - name: mlflow
-        image: quay.io/modh/mlflow-server:v2.20.2-rhoai-24
-        args:
-        - mlflow
-        - server
-        - --host=0.0.0.0
-        - --port=5000
-        - --backend-store-uri=postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/mlflow
-        - --default-artifact-root=/shared/mlflow-artifacts
-        - --serve-artifacts
+          pip install --quiet --target=/tmp/pylibs psycopg2-binary
+          export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
+          exec mlflow server \
+            --host=0.0.0.0 \
+            --port=5000 \
+            --backend-store-uri=postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/mlflow \
+            --default-artifact-root=/shared/models \
+            --serve-artifacts
         ports:
         - containerPort: 5000
           name: http
@@ -81,13 +83,13 @@ spec:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 30
+          initialDelaySeconds: 15
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 30
       volumes:
       - name: shared-storage
@@ -124,18 +126,13 @@ spec:
     termination: edge
 #
 # =============================================================================
-# ACCESS URLs (after deployment)
+# ACCESS URLs
 # =============================================================================
 #
 # MLflow UI: https://mlflow-feast-trainer-demo.apps.<cluster>/
 #
-# =============================================================================
-# SDK Configuration
-# =============================================================================
-#
-# In-cluster (training jobs):
-#   MLFLOW_TRACKING_URI=http://mlflow.feast-trainer-demo.svc.cluster.local:5000
-#
-# External (notebooks via workbench):
-#   MLFLOW_TRACKING_URI=https://mlflow-feast-trainer-demo.apps.<cluster>/
+# Python SDK:
+#   import mlflow
+#   mlflow.set_tracking_uri("http://mlflow.feast-trainer-demo.svc.cluster.local:5000")
+#   mlflow.set_experiment("sales-forecasting")
 #

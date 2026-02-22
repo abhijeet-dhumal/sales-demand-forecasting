@@ -20,7 +20,7 @@ spec:
     rayStartParams:
       dashboard-host: '0.0.0.0'
       num-cpus: '4'
-      num-gpus: '1'
+      # num-gpus: '1'  # Uncomment to enable GPU support
       block: 'true'
       ray-client-server-port: '10001'
       object-store-memory: '4000000000'
@@ -45,11 +45,11 @@ spec:
             requests:
               cpu: "4"
               memory: "16Gi"
-              nvidia.com/gpu: "1"
+              # nvidia.com/gpu: "1"  # Uncomment to request GPU
             limits:
               cpu: "8"
               memory: "24Gi"
-              nvidia.com/gpu: "1"
+              # nvidia.com/gpu: "1"  # Uncomment to limit GPU
           env:
           - name: FEAST_DATA_ROOT
             value: "/shared/data"
@@ -78,7 +78,7 @@ spec:
     groupName: workers
     rayStartParams:
       num-cpus: '4'
-      num-gpus: '1'
+      # num-gpus: '1'  # Uncomment to enable GPU support
       block: 'true'
       object-store-memory: '4000000000'
     template:
@@ -95,11 +95,11 @@ spec:
             requests:
               cpu: "4"
               memory: "16Gi"
-              nvidia.com/gpu: "1"
+              # nvidia.com/gpu: "1"  # Uncomment to request GPU
             limits:
               cpu: "8"
               memory: "24Gi"
-              nvidia.com/gpu: "1"
+              # nvidia.com/gpu: "1"  # Uncomment to limit GPU
           volumeMounts:
           - name: shared-storage
             mountPath: /shared

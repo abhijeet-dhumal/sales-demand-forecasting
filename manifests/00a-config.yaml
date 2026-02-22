@@ -1,0 +1,85 @@
+# Centralized Configuration
+#
+# Single source of truth for shared configuration values.
+# Reference these in Deployments/Jobs using envFrom or env valueFrom.
+#
+# Usage:
+#   envFrom:
+#   - configMapRef:
+#       name: mlops-config
+#
+# Or individual values:
+#   env:
+#   - name: MLFLOW_TRACKING_URI
+#     valueFrom:
+#       configMapKeyRef:
+#         name: mlops-config
+#         key: MLFLOW_TRACKING_URI
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlops-config
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: mlops-config
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+data:
+  # === Database ===
+  POSTGRES_HOST: "postgres.feast-trainer-demo.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DATABASE: "feast"
+  
+  # === MLflow ===
+  MLFLOW_TRACKING_URI: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+  MLFLOW_EXPERIMENT_NAME: "sales-forecasting"
+  
+  # === Ray Cluster ===
+  RAY_CLUSTER_NAME: "feast-ray"
+  RAY_NAMESPACE: "feast-trainer-demo"
+  RAY_ADDRESS: "ray://feast-ray-head-svc.feast-trainer-demo.svc.cluster.local:10001"
+  
+  # === Feast ===
+  FEAST_REGISTRY_TYPE: "sql"
+  FEAST_ONLINE_STORE_TYPE: "postgres"
+  FEATURE_REPO_PATH: "/shared/feature_repo"
+  
+  # === Model Registry (RHOAI) ===
+  MODEL_REGISTRY_URL: "https://model-catalog.rhoai-model-registries.svc.cluster.local:8443"
+  REGISTERED_MODEL_NAME: "sales-forecast"
+  
+  # === Storage ===
+  DATA_PATH: "/shared/data"
+  OUTPUT_DIR: "/shared/models"
+  
+  # === Training Defaults ===
+  NUM_EPOCHS: "20"
+  BATCH_SIZE: "512"
+  LEARNING_RATE: "0.001"
+---
+# External Secrets Template (uncomment and configure for production)
+# Requires: External Secrets Operator + AWS/Vault/GCP backend
+#
+# apiVersion: external-secrets.io/v1beta1
+# kind: ExternalSecret
+# metadata:
+#   name: postgres-external-secret
+#   namespace: feast-trainer-demo
+# spec:
+#   refreshInterval: 1h
+#   secretStoreRef:
+#     name: vault-backend  # or aws-secrets-manager
+#     kind: ClusterSecretStore
+#   target:
+#     name: postgres-secret
+#     creationPolicy: Owner
+#   data:
+#   - secretKey: username
+#     remoteRef:
+#       key: mlops/postgres
+#       property: username
+#   - secretKey: password
+#     remoteRef:
+#       key: mlops/postgres
+#       property: password
