@@ -1,0 +1,29 @@
+# FeatureStore CR for OpenShift AI Dashboard visibility
+# This registers the Feast deployment with the Feast Operator
+apiVersion: feast.dev/v1
+kind: FeatureStore
+metadata:
+  name: sales-forecasting
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+spec:
+  feastProject: sales_forecasting
+  feastProjectDir:
+    git:
+      url: https://github.com/redhat-ai-services/sales-demand-forecasting.git
+      ref: main
+      featureRepoPath: feature_repo
+  services:
+    registry:
+      local:
+        server:
+          image: quay.io/feast/feature-server:0.47.0
+          restAPI: true
+    onlineStore:
+      server:
+        image: quay.io/feast/feature-server:0.47.0
+    offlineStore:
+      server:
+        image: quay.io/feast/feature-server:0.47.0
+    ui: {}

@@ -1,0 +1,179 @@
+# Serving script ConfigMap for KServe InferenceService
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sales-forecast-serve
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+data:
+  serve.py: |
+    #!/usr/bin/env python3
+    """Sales Forecasting Inference Server (KServe V2 Protocol)
+    
+    Receives entity IDs, fetches features from Feast, runs model inference.
+    """
+    import os
+    import json
+    import requests
+    import torch
+    import torch.nn as nn
+    import joblib
+    import numpy as np
+    import logging
+    from typing import Dict, Union
+    from kserve import Model, ModelServer, InferRequest, InferResponse, InferOutput
+    
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+    logger = logging.getLogger(__name__)
+    
+    FEAST_SERVER_URL = os.getenv("FEAST_SERVER_URL", "http://feast-server.feast-trainer-demo.svc.cluster.local:6566")
+    
+    
+    class SalesMLP(nn.Module):
+        """Multi-layer perceptron matching training architecture."""
+        
+        def __init__(self, input_dim, hidden_dims=None, dropout=0.2):
+            super().__init__()
+            if hidden_dims is None:
+                hidden_dims = [256, 128, 64]
+            layers = []
+            prev_dim = input_dim
+            for h_dim in hidden_dims:
+                layers.extend([
+                    nn.Linear(prev_dim, h_dim),
+                    nn.BatchNorm1d(h_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout)
+                ])
+                prev_dim = h_dim
+            layers.append(nn.Linear(prev_dim, 1))
+            self.net = nn.Sequential(*layers)
+        
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+    
+    
+    class SalesForecastModel(Model):
+        """KServe Model with Feast feature lookup."""
+        
+        def __init__(self, name: str):
+            super().__init__(name)
+            self.model = None
+            self.scalers = None
+            self.feature_cols = None
+            self.use_log_transform = False
+            self.ready = False
+        
+        def load(self):
+            """Load model and scalers from shared storage."""
+            model_dir = os.getenv("MODEL_DIR", "/shared/models")
+            logger.info(f"Loading model from {model_dir}...")
+            
+            with open(f"{model_dir}/model_metadata.json") as f:
+                metadata = json.load(f)
+            
+            hidden_dims = metadata.get("hidden_dims", [256, 128, 64])
+            dropout = metadata.get("dropout", 0.2)
+            input_dim = metadata["input_dim"]
+            
+            self.model = SalesMLP(input_dim, hidden_dims, dropout)
+            self.model.load_state_dict(
+                torch.load(f"{model_dir}/model_best.pt", map_location="cpu", weights_only=True)
+            )
+            self.model.eval()
+            
+            self.scalers = joblib.load(f"{model_dir}/scalers.joblib")
+            self.feature_cols = metadata["feature_columns"]
+            self.use_log_transform = metadata.get("use_log_transform", False)
+            
+            logger.info(f"Model loaded: {len(self.feature_cols)} features")
+            self.ready = True
+        
+        def _get_features_from_feast(self, entity_rows):
+            """Fetch features from Feast online store."""
+            payload = {
+                "feature_service": "inference_features",
+                "entities": {
+                    "store_id": [row["store_id"] for row in entity_rows],
+                    "dept_id": [row["dept_id"] for row in entity_rows],
+                }
+            }
+            
+            response = requests.post(
+                f"{FEAST_SERVER_URL}/get-online-features",
+                json=payload,
+                timeout=10
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            feature_names = result.get("metadata", {}).get("feature_names", [])
+            results = result.get("results", [])
+            
+            features = []
+            for i in range(len(entity_rows)):
+                row = {}
+                for j, name in enumerate(feature_names):
+                    if name in self.feature_cols and j < len(results):
+                        val = results[j].get("values", [None])[i] if i < len(results[j].get("values", [])) else None
+                        row[name] = val if val is not None else 0
+                features.append(row)
+            
+            return features
+        
+        def preprocess(self, payload: Union[Dict, InferRequest], headers: Dict = None) -> np.ndarray:
+            """Extract entities and fetch features from Feast."""
+            if isinstance(payload, InferRequest):
+                inputs = {inp.name: inp.data for inp in payload.inputs}
+            else:
+                inputs = {inp["name"]: inp.get("data") for inp in payload.get("inputs", [])}
+            
+            if "entities" in inputs:
+                entities = inputs["entities"]
+                if isinstance(entities, list) and len(entities) > 0:
+                    feature_rows = self._get_features_from_feast(entities)
+                    X = np.array(
+                        [[row.get(c, 0) for c in self.feature_cols] for row in feature_rows],
+                        dtype=np.float32
+                    )
+                    return X
+            
+            if "features" in inputs:
+                return np.array(inputs["features"], dtype=np.float32)
+            
+            raise ValueError("Input must have 'entities' or 'features'")
+        
+        def predict(self, X: np.ndarray, headers: Dict = None) -> np.ndarray:
+            """Run model inference."""
+            X_scaled = self.scalers["scaler_X"].transform(X)
+            
+            with torch.no_grad():
+                preds = self.model(torch.FloatTensor(X_scaled)).numpy()
+            
+            predictions = self.scalers["scaler_y"].inverse_transform(preds.reshape(-1, 1)).flatten()
+            if self.use_log_transform:
+                predictions = np.expm1(predictions)
+            
+            return predictions
+        
+        def postprocess(self, predictions: np.ndarray, headers: Dict = None) -> Union[Dict, InferResponse]:
+            """Format as V2 InferResponse."""
+            return InferResponse(
+                model_name=self.name,
+                response_id=str(hash(str(predictions.tolist()))),
+                infer_outputs=[
+                    InferOutput(
+                        name="predictions",
+                        shape=list(predictions.shape),
+                        datatype="FP32",
+                        data=predictions.tolist()
+                    )
+                ]
+            )
+    
+    
+    if __name__ == "__main__":
+        model = SalesForecastModel("sales-forecast")
+        model.load()
+        ModelServer().start([model])

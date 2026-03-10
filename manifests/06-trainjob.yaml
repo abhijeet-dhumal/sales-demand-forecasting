@@ -33,14 +33,20 @@ spec:
     numProcPerNode: 1
     resourcesPerNode:
       requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
         cpu: "4"
         memory: "8Gi"
-        # nvidia.com/gpu: "1"  # Uncomment to request GPU (uses NCCL backend)
-      limits:
-        cpu: "8"
-        memory: "16Gi"
-        # nvidia.com/gpu: "1"  # Uncomment to limit GPU
     env:
+    # Use REMOTE Ray mode - connects directly to Ray cluster (bypasses CodeFlare SDK issue)
+    - name: FEAST_RAY_EXECUTION_MODE
+      value: "remote"
+    - name: RAY_ADDRESS
+      value: "ray://feast-ray-head-svc.feast-trainer-demo.svc.cluster.local:10001"
+    # Force CPU training (avoids NCCL GPU issues in multi-node without proper GPU allocation)
+    - name: CUDA_VISIBLE_DEVICES
+      value: ""
     # Data paths
     - name: DATA_PATH
       value: /shared/data

@@ -13,6 +13,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: shared
 spec:
+  storageClassName: nfs-csi
   accessModes:
     - ReadWriteMany
   resources:
