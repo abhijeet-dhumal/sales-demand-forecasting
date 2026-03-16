@@ -1,10 +1,14 @@
 # Sales Forecasting MLOps Pipeline
 #
-# Deploy infrastructure:
-#   kubectl apply -k manifests/
+# Deploy all infrastructure:
+#   oc apply -k manifests/
 #
-# Then run jobs:
-#   kubectl apply -f manifests/05-dataprep-job.yaml
+# Or deploy by component:
+#   oc apply -f manifests/base/
+#   oc apply -f manifests/databases/
+#   oc apply -f manifests/ray/
+#   oc apply -f manifests/feast/
+#   oc apply -f manifests/mlflow/
 #
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -17,25 +21,33 @@ labels:
   includeSelectors: false
 
 resources:
-# Infrastructure (apply in order)
-- 00-prereqs.yaml        # Namespace + shared PVC
-- 00a-config.yaml        # Centralized configuration
-- 01-postgres.yaml       # PostgreSQL
-- 02-mlflow.yaml         # Standalone MLflow server
-- 03-raycluster.yaml     # KubeRay cluster
-- 04a-feast-rbac.yaml    # RBAC for Feast/Ray
-- 04b-feast-server.yaml  # Feast server + UI
-- 07-observability.yaml  # Quotas, NetworkPolicies, PDBs, Monitoring
+# === Base Infrastructure ===
+- base/namespace.yaml
+- base/shared-pvc.yaml
+- base/config.yaml
 
-# Jobs (apply separately after infrastructure is ready):
-# - 05-dataprep-job.yaml   (make dataprep)
-# - 06-trainjob.yaml       (make train)
-# - 08-kserve-inference.yaml
+# === Databases ===
+- databases/postgres.yaml
+- databases/redis.yaml
 
-# ConfigMaps generated from files
-configMapGenerator:
-- name: training-scripts
-  files:
-  - scripts/train_ddp.py
-  options:
-    disableNameSuffixHash: true
+# === Distributed Compute ===
+- ray/rbac.yaml
+- ray/raycluster.yaml
+
+# === Feature Store ===
+- feast/data-stores-secret.yaml
+- feast/featurestore.yaml
+
+# === Experiment Tracking ===
+- mlflow/mlflow.yaml
+
+# === Observability ===
+- observability/policies.yaml
+
+# === Jobs (apply separately - alternatives to notebooks) ===
+# oc apply -f manifests/feast/dataprep-scripts-configmap.yaml
+# oc apply -f manifests/feast/dataprep-job.yaml
+# oc apply -f manifests/training/training-script-configmap.yaml
+# oc apply -f manifests/training/trainjob.yaml
+# oc apply -f manifests/serving/serve-configmap.yaml
+# oc apply -f manifests/serving/kserve-inference.yaml

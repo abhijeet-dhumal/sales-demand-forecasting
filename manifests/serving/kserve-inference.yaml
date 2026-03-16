@@ -1,0 +1,108 @@
+# KServe InferenceService for Sales Forecasting
+#
+# Deploys the trained model with Feast SDK integration (gRPC).
+# Uses the same approach as notebooks/03_inferencing/03-inference.ipynb
+#
+# Prerequisites:
+#   - Training completed (model artifacts in shared PVC)
+#   - Feast FeatureStore CR deployed (provides client ConfigMaps)
+#   - serve-configmap.yaml applied
+#
+# Usage:
+#   oc apply -f manifests/serving/serve-configmap.yaml
+#   oc apply -f manifests/serving/kserve-inference.yaml
+#
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 3
+    containers:
+    - name: kserve-container
+      image: quay.io/modh/training:py312-cuda128-torch280
+      command: ["/bin/bash", "-c"]
+      args:
+      - |
+        pip install -q kserve joblib numpy scikit-learn pandas feast==0.61.0 psycopg2-binary && \
+        python /scripts/serve.py
+      ports:
+      - containerPort: 8080
+        protocol: TCP
+      env:
+      - name: MODEL_DIR
+        value: /shared/models
+      - name: FEAST_CONFIG_PATH
+        value: /opt/app-root/src/feast-config/salesforecasting
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      readinessProbe:
+        httpGet:
+          path: /v2/health/ready
+          port: 8080
+        initialDelaySeconds: 90
+        periodSeconds: 10
+      volumeMounts:
+      - name: scripts
+        mountPath: /scripts
+      - name: model-storage
+        mountPath: /shared
+      - name: feast-config
+        mountPath: /opt/app-root/src/feast-config/salesforecasting
+      - name: feast-ca
+        mountPath: /etc/pki/tls/custom-certs
+    volumes:
+    - name: scripts
+      configMap:
+        name: sales-forecast-serve
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: shared
+    - name: feast-config
+      configMap:
+        name: feast-salesforecasting-client
+    - name: feast-ca
+      configMap:
+        name: feast-salesforecasting-client-ca
+        items:
+        - key: service-ca.crt
+          path: ca-bundle.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sales-forecast-external
+  namespace: feast-trainer-demo
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: sales-forecast
+  ports:
+  - name: http
+    port: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: sales-forecast-external
+  port:
+    targetPort: http
+  tls:
+    termination: edge

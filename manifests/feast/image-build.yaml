@@ -1,0 +1,61 @@
+# Feast Feature Server Image Build
+#
+# BuildConfig to create custom image with Ray + PostgreSQL + Redis
+#
+# Prerequisites:
+#   oc create secret docker-registry quay-push-secret \
+#     --docker-server=quay.io \
+#     --docker-username=<username> \
+#     --docker-password=<password> \
+#     -n feast-trainer-demo
+#
+#   oc secrets link builder quay-push-secret -n feast-trainer-demo
+#
+# Usage:
+#   oc apply -f manifests/feast/image-build.yaml
+#   oc start-build feast-ray-server --follow
+#
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: feast-ray-server
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast-ray-server
+    app.kubernetes.io/component: image-build
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+spec:
+  output:
+    to:
+      kind: DockerImage
+      name: quay.io/abdhumal/feast-ray-server:latest
+    pushSecret:
+      name: quay-push-secret
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM registry.access.redhat.com/ubi9/python-311:1
+
+      USER 0
+      RUN dnf install -y --nodocs libpq-devel gcc python3.11-devel && dnf clean all
+
+      COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+      ENV UV_CACHE_DIR=/tmp/uv-cache
+
+      RUN uv pip install --system --python /usr/bin/python3.11 --no-cache \
+          "feast[postgres,ray,redis,grpcio]==0.61.0" \
+          "psycopg2-binary" \
+          "codeflare-sdk==0.35.0" \
+          "pyarrow>=14.0.0"
+
+      USER 1001
+      ENV FEAST_USAGE=false
+      ENV PYTHONUNBUFFERED=1
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/ubi9/python-311:1
+  triggers: []

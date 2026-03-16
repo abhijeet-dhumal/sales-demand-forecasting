@@ -1,0 +1,17 @@
+# Shared Storage for notebooks, feature_repo, and data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: shared-storage
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+spec:
+  storageClassName: nfs-csi
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi

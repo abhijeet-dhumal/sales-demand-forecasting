@@ -1,0 +1,73 @@
+# OpenShift BuildConfig for Feast Feature Server with Ray support
+#
+# This builds a custom Feast Feature Server image that includes:
+# - Ray for distributed offline store operations
+# - PostgreSQL for registry
+# - Redis for online store
+# - gRPC for server communication
+#
+# Prerequisites:
+#   1. Create Quay.io push secret:
+#      oc create secret docker-registry quay-push-secret \
+#        --docker-server=quay.io \
+#        --docker-username=<your-quay-username> \
+#        --docker-password=<your-quay-password> \
+#        -n feast-trainer-demo
+          # oc create secret generic quay-push-secret \
+          #   --from-file=.dockerconfigjson=~/.config/containers/auth.json \
+          #   --type=kubernetes.io/dockerconfigjson \
+          #   -n feast-trainer-demo
+#
+#   2. Link secret to builder service account:
+#      oc secrets link builder quay-push-secret -n feast-trainer-demo
+#
+# Usage:
+#   oc apply -f images/feast-server/build.yaml -n feast-trainer-demo
+#   oc start-build feast-ray-server -n feast-trainer-demo --follow
+#
+# Alternative (local build):
+#   podman build -t quay.io/abdhumal/feast-ray-server:latest images/feast-server/
+#   podman push quay.io/abdhumal/feast-ray-server:latest
+#
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: feast-ray-server
+  namespace: feast-trainer-demo
+spec:
+  output:
+    to:
+      kind: DockerImage
+      name: quay.io/abdhumal/feast-ray-server:latest
+    pushSecret:
+      name: quay-push-secret
+  source:
+    type: Dockerfile
+    dockerfile: |
+      # Feast Feature Server with Ray + PostgreSQL + Redis support
+      FROM registry.access.redhat.com/ubi9/python-311:1
+
+      USER 0
+      RUN dnf install -y --nodocs libpq-devel gcc python3.11-devel && dnf clean all
+
+      COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+      ENV UV_CACHE_DIR=/tmp/uv-cache
+
+      # Install Feast with Ray, PostgreSQL, Redis, gRPC (no DuckDB needed)
+      RUN uv pip install --system --python /usr/bin/python3.11 --no-cache \
+          "feast[postgres,ray,redis,grpcio]==0.61.0" \
+          "psycopg2-binary" \
+          "codeflare-sdk==0.35.0" \
+          "pyarrow>=14.0.0"
+
+      USER 1001
+      ENV FEAST_USAGE=false
+      ENV PYTHONUNBUFFERED=1
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/ubi9/python-311:1
+  triggers: []

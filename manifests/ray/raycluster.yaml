@@ -1,0 +1,129 @@
+# KubeRay Cluster - Distributed Processing
+#
+# Used by:
+#   - Feast: Offline Store (type: ray) - distributed PIT joins
+#   - Feast: Batch Engine - distributed materialization
+#   - Training: PyTorch DDP distributed training
+#
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: feast-ray
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast-ray
+    app.kubernetes.io/component: compute
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+  annotations:
+    odh.ray.io/secure-trusted-network: "false"
+spec:
+  rayVersion: '2.52.1'
+  enableInTreeAutoscaling: false
+  
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      num-cpus: '4'
+      num-gpus: '0'
+      block: 'true'
+      ray-client-server-port: '10001'
+      object-store-memory: '4000000000'
+    template:
+      metadata:
+        labels:
+          app: feast-ray
+          component: head
+      spec:
+        containers:
+        - name: ray-head
+          image: quay.io/abdhumal/feast-ray-server:latest
+          ports:
+          - containerPort: 6379
+            name: gcs
+          - containerPort: 8265
+            name: dashboard
+          - containerPort: 10001
+            name: client
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "12Gi"
+          env:
+          - name: FEAST_DATA_ROOT
+            value: "/shared/data"
+          volumeMounts:
+          - name: shared-storage
+            mountPath: /shared
+          - name: shared-storage
+            mountPath: /opt/app-root/src/shared
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+  
+  workerGroupSpecs:
+  - replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    groupName: workers
+    rayStartParams:
+      num-cpus: '4'
+      num-gpus: '0'
+      block: 'true'
+      object-store-memory: '4000000000'
+    template:
+      metadata:
+        labels:
+          app: feast-ray
+          component: worker
+      spec:
+        containers:
+        - name: ray-worker
+          image: quay.io/abdhumal/feast-ray-server:latest
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "12Gi"
+          volumeMounts:
+          - name: shared-storage
+            mountPath: /shared
+          - name: shared-storage
+            mountPath: /opt/app-root/src/shared
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feast-ray-dashboard
+  namespace: feast-trainer-demo
+spec:
+  to:
+    kind: Service
+    name: feast-ray-head-svc
+  port:
+    targetPort: dashboard
+  tls:
+    termination: edge

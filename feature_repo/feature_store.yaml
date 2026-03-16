@@ -1,32 +1,45 @@
 # Feast Feature Store Configuration
 #
-# Shared infrastructure:
-# - Registry: PostgreSQL (feast-trainer-demo namespace)
-# - Offline Store: File-based (Parquet on shared PVC)
-# - Online Store: PostgreSQL (low-latency serving)
+# This is a template configuration. When using the Feast Operator,
+# the operator generates the actual config in the client ConfigMap.
 #
-# Data paths are auto-detected by features.py:
-# - Workbench: /opt/app-root/src/shared/data/
-# - Pods: /shared/data/
+# For local mode (01a-local.ipynb), this file is regenerated with
+# cluster-specific connection strings.
 
 project: sales_forecasting
 provider: local
 
 registry:
   registry_type: sql
-  path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
+  path: postgresql+psycopg2://feast:feast@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
   cache_ttl_seconds: 60
+  sqlalchemy_config:
+    pool_pre_ping: true
 
 offline_store:
-  type: file
+  type: ray
+  storage_path: /shared/data/ray_storage
+  use_kuberay: true
+  cluster_name: feast-ray
+  kuberay_conf:
+    namespace: feast-trainer-demo
+    skip_tls: true
+  broadcast_join_threshold_mb: 100
+  enable_distributed_joins: true
+  enable_ray_logging: false
+
+batch_engine:
+  type: ray.engine
+  use_kuberay: true
+  cluster_name: feast-ray
+  kuberay_conf:
+    namespace: feast-trainer-demo
+    skip_tls: true
+  enable_optimization: true
+  enable_ray_logging: false
 
 online_store:
-  type: postgres
-  host: postgres.feast-trainer-demo.svc.cluster.local
-  port: 5432
-  database: feast
-  db_schema: public
-  user: feast
-  password: feast123
+  type: redis
+  connection_string: redis.feast-trainer-demo.svc.cluster.local:6379
 
 entity_key_serialization_version: 3

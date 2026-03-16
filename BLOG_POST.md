@@ -1,755 +1,296 @@
-# Feast + Ray + Kubeflow Training Operator + MLflow + KServe: A Production MLOps Blueprint
+# Building a Production ML Pipeline: Feast + Kubeflow + MLflow + KServe
 
-*Building a scalable ML pipeline that eliminates feature skew from training to serving*
+*A blueprint for scalable ML pipelines that eliminate feature skew from training to serving*
 
 **By Abhijeet Dhumal and Nikhil Kathole**
 
 ---
 
+Machine learning has moved far beyond experimental notebooks. Today, enterprises deploy models that drive real business decisions—from demand forecasting and fraud detection to personalized recommendations and predictive maintenance. Yet the path from a working prototype to a reliable production system remains fraught with challenges that have little to do with model architecture or hyperparameter tuning.
+
+Google's seminal paper [Hidden Technical Debt in Machine Learning Systems](https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf) (NIPS 2015) established that ML systems incur massive ongoing maintenance costs—not from model code, but from data dependencies, configuration complexity, and the erosion of abstraction boundaries. The reality is that most ML failures in production stem from data inconsistencies, not algorithmic issues. This phenomenon, known as [training-serving skew](https://developers.google.com/machine-learning/guides/rules-of-ml#training-serving_skew), occurs when features are computed differently during training versus inference—often due to inconsistent logic implementations across languages, systems, or data pipelines.
+
+Industry leaders learned this lesson through costly experience. [Uber](https://www.uber.com/blog/michelangelo-machine-learning-platform/) built Michelangelo specifically to solve feature consistency after experiencing model degradation. [DoorDash](https://doordash.engineering/2020/11/19/building-a-gigascale-ml-feature-store-with-redis/) reported significant prediction errors in delivery time estimates before implementing their feature store. [Netflix](https://netflixtechblog.com/distributed-time-travel-for-feature-generation-389cccdd3907) developed distributed time travel for feature generation to enable offline testing with historical data. [Airbnb](https://medium.com/airbnb-engineering/chronon-a-declarative-feature-engineering-framework-b7b8ce796e04) created Chronon, a declarative feature engineering framework, to centralize feature computation for both training and inference. [Atlassian](https://tecton.ai/customers/atlassian) reduced feature deployment from months to days while improving data consistency from 96% to 99.9% after adopting a feature platform.
+
+Feature stores have emerged as critical infrastructure to address these challenges, providing a single source of truth for feature definitions that both training and serving can rely on. Combined with distributed training frameworks that scale across multiple nodes and accelerators, experiment tracking systems that ensure reproducibility, and serving platforms that handle auto-scaling and traffic management, organizations can build ML pipelines that are robust, scalable, and maintainable.
+
+This article walks you through building a complete ML pipeline for retail demand forecasting—a challenge that costs the industry dearly when done poorly. According to [IHL Group research](https://www.ihlservices.com/news/analyst-corner/2025/09/retail-inventory-crisis-persists-despite-172-billion-in-improvements/), global retailers lose approximately **\$1.77 trillion annually** due to inventory distortion—out-of-stocks account for \$1.2 trillion in lost sales, while overstocking costs another \$562 billion in markdowns and waste.
+
+Our use case is inspired by the [Walmart Store Sales Forecasting](https://www.kaggle.com/c/walmart-recruiting-store-sales-forecasting) challenge on Kaggle and draws from techniques used in the [M5 Forecasting Competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy)—the largest retail forecasting benchmark to date, featuring 42,840 hierarchical time series of Walmart unit sales. We predict weekly sales across multiple stores and departments using historical patterns, temporal features, and economic indicators.
+
+To build this pipeline, we use [Red Hat OpenShift AI](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai), which provides a comprehensive platform for the complete ML lifecycle by integrating open source projects and operators. This article demonstrates a subset of its capabilities:
+
+- **[Feast](https://docs.feast.dev/)** for feature management — with [PostgreSQL](https://www.postgresql.org/) for registry, [Redis](https://redis.io/) for online serving, and [Ray](https://docs.ray.io/) for distributed offline computations
+- **[Kubeflow Training Operator](https://www.kubeflow.org/docs/components/training/)** for distributed training — supporting both NVIDIA ([CUDA](https://developer.nvidia.com/cuda-toolkit)/[NCCL](https://developer.nvidia.com/nccl)) and AMD ([ROCm](https://www.amd.com/en/products/software/rocm.html)/[RCCL](https://github.com/ROCm/rccl)) accelerators
+- **[MLflow](https://mlflow.org/)** for experiment tracking and model registry
+- **[KServe](https://kserve.github.io/website/)** for auto-scaling model serving
+
+Most importantly, we show how the same feature definitions power both training and inference, eliminating the training-serving skew that plagues production ML systems.
+
+---
+
 ## TL;DR
 
-```bash
-# Clone and deploy in 5 commands
-git clone https://github.com/redhat-et/sales-demand-forecasting
-cd sales-demand-forecasting
-kubectl apply -k manifests/                    # Deploy infrastructure
-kubectl apply -f manifests/05-dataprep-job.yaml  # Prepare features
-kubectl apply -f manifests/06-trainjob.yaml      # Train model
-```
+This blueprint combines five technologies to build a production-ready ML pipeline:
 
-**What you get:** A complete ML pipeline where training and serving use identical feature definitions (via Feast), feature retrieval scales to 10M+ rows (via Ray), training runs distributed across nodes (via Kubeflow Training Operator), experiments are tracked (via MLflow), and serving auto-scales (via KServe).
-
-**Key result:** 3-5% MAPE on retail forecasting with zero training-serving skew.
+| Component | Purpose |
+|-----------|---------|
+| **Feast** | Single source of truth for features (training + serving) |
+| **Ray** | Distributed feature retrieval that scales to millions of rows |
+| **Kubeflow Trainer** | Multi-node PyTorch DDP training |
+| **MLflow** | Experiment tracking and model registry |
+| **KServe** | Auto-scaling model serving with Feast integration |
 
 ---
 
-![Feature Lineage in Feast UI](docs/images/sales_forecasting_lineage.png)
-*Figure 1: Feast UI showing feature lineage from data sources → entities → feature views → feature services. This single source of truth powers both training and inference.*
+## The Problem: Training-Serving Skew
 
----
-
-## Introduction
-
-Feature stores have become essential infrastructure for production ML systems. Yet many tutorials stop at "define your features in Feast"—they don't show how to scale feature retrieval to millions of rows, distribute training across nodes, or serve predictions without duplicating feature logic.
-
-This article walks you through building an end-to-end ML pipeline using Feast, Ray, Kubeflow Training Operator, MLflow, and KServe. You'll see how these tools compose together to solve three common problems:
-
-1. **Point-in-time joins don't scale** — Pandas runs out of memory on 10M+ rows
-2. **Feature logic gets duplicated** — Training scripts diverge from serving code  
-3. **Training-serving skew** — Silent model degradation when features differ
-
-We use retail demand forecasting as our example: 45 stores × 14 departments × 104 weeks = **65K records**, scaling to millions in production.
-
----
-
-## Why This Matters: The $50M Feature Skew Problem
-
-Training-serving skew isn't a theoretical concern—it's a production reality that has cost companies millions:
-
-- **Uber** built [Michelangelo](https://www.uber.com/blog/michelangelo-machine-learning-platform/) specifically to solve feature consistency after experiencing model degradation in production
-- **DoorDash** reported that feature skew caused [significant prediction errors](https://doordash.engineering/2020/11/19/building-a-gigascale-ml-feature-store-with-redis/) in delivery time estimates before implementing their feature store
-- **Instacart** found that [70% of ML bugs](https://www.instacart.com/company/how-its-made/building-a-modern-ml-platform-at-instacart/) in production were data-related, not model-related
-
-The pattern is consistent: **models that work perfectly in notebooks fail silently in production** because the feature computation differs between training and serving.
+The pattern across industries is consistent: **models that work perfectly in notebooks fail silently in production** because feature computation differs between training and serving. As discussed above, this problem drove Uber, DoorDash, Netflix, Airbnb, and Atlassian to invest heavily in feature platforms.
 
 ### What Goes Wrong Without a Feature Store
 
 | Failure Mode | Symptom | Business Impact |
 |--------------|---------|-----------------|
 | **Stale features** | Serving uses yesterday's data while training used point-in-time | Predictions drift over time |
-| **Different aggregations** | Training computes 4-week rolling avg differently than serving | Model accuracy drops 5-15% |
+| **Different aggregations** | Training computes rolling averages differently than serving | Model accuracy drops |
 | **Missing features** | Serving code omits a feature that training included | Silent prediction errors |
 | **Type mismatches** | Training uses float64, serving uses float32 | Subtle numerical differences |
-
-In retail forecasting specifically, a 5% increase in MAPE (Mean Absolute Percentage Error) can translate to **millions in lost revenue** from overstocking or stockouts. The architecture in this article eliminates these failure modes by construction.
-
----
-
-## Prerequisites
-
-You need access to a Kubernetes cluster (OpenShift, EKS, GKE, or local) with the following components:
-
-| Component | Purpose | Installation |
-|-----------|---------|--------------|
-| **KubeRay** | Ray cluster orchestration | [Helm install](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) |
-| **Kubeflow Training Operator** | Distributed training jobs | [kubectl apply](https://www.kubeflow.org/docs/components/training/installation/) |
-| **KServe** | Model serving | [Quick install](https://kserve.github.io/website/latest/get_started/) |
-| **PostgreSQL** | Feast registry + online store | Included in our manifests |
-
-**Quick check** — Verify operators are running:
-
-```bash
-kubectl get pods -n ray-system          # KubeRay operator
-kubectl get pods -n kubeflow            # Training operator  
-kubectl get pods -n kserve              # KServe controller
-```
-
-> **Note:** If your cluster doesn't have RWX (ReadWriteMany) storage, you'll need to configure shared storage. We use a shared PVC—our manifests include a default `StorageClass`. For OpenShift, [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation) provides this out of the box.
-
----
-
-## Repository Structure
-
-```
-sales-demand-forecasting/
-├── feature_repo/                    # Feast feature definitions
-│   ├── features.py                  # Entities, FeatureViews, FeatureServices
-│   ├── feature_store.yaml           # Feast config (local/dev)
-│   └── feature_store_ray.yaml       # Feast config (KubeRay)
-├── manifests/                       # Kubernetes deployments
-│   ├── 01-namespace.yaml            # Namespace + RBAC
-│   ├── 02-postgres.yaml             # PostgreSQL (Feast registry + online store)
-│   ├── 03-ray-cluster.yaml          # KubeRay cluster
-│   ├── 04-mlflow.yaml               # MLflow tracking server
-│   ├── 05-dataprep-job.yaml         # Data generation + feast apply/materialize
-│   ├── 06-trainjob.yaml             # Kubeflow TrainJob (PyTorch DDP)
-│   ├── 07-feast-server.yaml         # Feast feature server
-│   ├── 08-kserve-inference.yaml     # KServe InferenceService
-│   └── scripts/
-│       └── train_ddp.py             # Training script
-├── notebooks/                       # Interactive exploration
-│   ├── 01-feast-features.ipynb      # Feature engineering
-│   ├── 02-training.ipynb            # Model training
-│   └── 03-inference.ipynb           # Serving setup
-└── docs/diagrams/                   # Architecture diagrams
-```
 
 ---
 
 ## Architecture Overview
 
-![Sequence Diagram](docs/diagrams/sequence-diagram.png)
-*Figure 2: Complete pipeline flow across three phases: Feature Engineering → Distributed Training → Model Serving. The same FeatureService definitions are used in training and inference, ensuring zero skew.*
+![Pipeline Architecture](docs/diagrams/sequence-diagram.png)
+*Complete pipeline flow: Feature Engineering → Distributed Training → Model Serving. The same FeatureService definitions power both training and inference.*
 
-The architecture separates concerns across five components:
+The architecture separates concerns across five components that work together seamlessly on OpenShift AI:
 
 | Component | Role |
 |-----------|------|
-| **Feast** | Feature definitions, offline/online stores, point-in-time joins |
-| **Ray (KubeRay)** | Distributed `get_historical_features()` — scales to 10M+ rows |
-| **Kubeflow Training Operator** | Multi-node PyTorch DDP orchestration |
-| **MLflow** | Experiment tracking, model registry |
-| **KServe** | Auto-scaling inference with Feast integration |
+| **Feast Operator** | Manages feature store infrastructure (registry, online/offline stores) |
+| **Ray (KubeRay)** | Distributed `get_historical_features()` — scales to millions of rows |
+| **Kubeflow Trainer** | Multi-node PyTorch Distributed Training orchestration |
+| **MLflow Operator** | Experiment tracking with workspace isolation |
+| **KServe** | Auto-scaling inference with Feast SDK integration |
 
-All components share a common PVC at `/shared`, eliminating the need for S3 or artifact copying between stages.
+---
+
+## Getting Started on OpenShift AI
+
+Before diving into the ML pipeline phases, let's set up the environment on OpenShift AI.
+
+### Step 1: Access OpenShift AI
+
+![Access OpenShift AI](docs/images/access-openshift-ai.png)
+*Navigate to OpenShift AI from the OpenShift console.*
+
+### Step 2: Create a Data Science Project
+
+![Create Project](docs/images/create-project.png)
+*Create a new Data Science Project to organize your ML resources.*
+
+![Project Overview](docs/images/project-overview.png)
+*OpenShift AI Data Science Project with all components configured.*
+
+### Step 3: Configure Storage
+
+![Attach Storage](docs/images/attach-storage.png)
+*Attach persistent storage for model artifacts and datasets.*
+
+### Step 4: Create a Workbench
+
+![Workbench Image](docs/images/workbench-image.png)
+*Select an appropriate workbench image with pre-installed ML libraries.*
+
+### Step 5: Connect to Feature Store
+
+![Feature Store Connection](docs/images/feature-store-connection.png)
+*Connect the workbench to the Feast feature store for seamless feature access.*
+
+![Workbench Running](docs/images/workbench-running.png)
+*Jupyter workbench connected to Feast feature store and shared storage.*
+
+### Prerequisites
+
+| Component | Purpose |
+|-----------|---------|
+| OpenShift AI | Managed ML platform |
+| Feast Operator | Feature store infrastructure |
+| Kubeflow Training Operator | Distributed training |
+| KServe | Model serving |
+| MLflow Operator | Experiment tracking |
 
 ---
 
 ## Phase 1: Feature Engineering with Feast
 
 ![Feature Engineering Workflow](docs/diagrams/01-features-workflow.png)
-*Figure 3: Feature engineering workflow: Generate data → Engineer features → Save to Parquet → Register with Feast → Materialize to online store.*
+*Feature engineering workflow: Generate data → Engineer features → Register with Feast → Materialize to online store.*
 
-Start by defining your features in Feast. The key insight is creating **two FeatureServices**—one for training (includes target) and one for inference (excludes target):
+### The Feast Operator Advantage
 
-### Define entities and feature views
+On OpenShift AI, the **Feast Operator** automates feature store infrastructure:
 
-Create `feature_repo/features.py`:
+| What It Manages | Benefit |
+|-----------------|---------|
+| **PostgreSQL Registry** | Durable metadata storage for feature definitions |
+| **Redis Online Store** | Low-latency feature serving |
+| **Ray Offline Store** | Distributed historical feature retrieval |
+| **gRPC Services** | Secure communication between components |
+| **Client ConfigMaps** | Auto-generated configuration for workbenches |
 
-```python
-# feature_repo/features.py
-from datetime import timedelta
-from feast import Entity, FeatureView, FeatureService, Field, FileSource
-from feast.types import Float32, Int32, String
+When you create a FeatureStore custom resource, the operator provisions all components and generates client configuration that workbenches can mount automatically.
 
-# Entities define your join keys
-store = Entity(name="store_id", join_keys=["store_id"])
-dept = Entity(name="dept_id", join_keys=["dept_id"])
+![Feature Store Overview](docs/images/FeatureStoreOverview.png)
+*Feast UI showing feature lineage from data sources → entities → feature views → feature services.*
 
-# Time-series features (lag, rolling stats, temporal)
-sales_features = FeatureView(
-    name="sales_features",
-    entities=[store, dept],
-    ttl=timedelta(days=365),
-    schema=[
-        Field(name="weekly_sales", dtype=Float32),    # Target variable
-        Field(name="lag_1", dtype=Float32),           # Lag features (35% importance)
-        Field(name="lag_2", dtype=Float32),
-        Field(name="lag_4", dtype=Float32),
-        Field(name="rolling_mean_4w", dtype=Float32), # Rolling stats (28% importance)
-        Field(name="rolling_std_4w", dtype=Float32),
-        Field(name="week_of_year", dtype=Int32),      # Temporal (18% importance)
-        Field(name="is_holiday", dtype=Int32),        # Holiday (10% importance)
-        Field(name="temperature", dtype=Float32),     # Economic (7% importance)
-    ],
-    source=FileSource(path="/shared/data/sales_features.parquet", timestamp_field="event_timestamp"),
-)
+### Feature Services: The Key to Consistency
 
-# Static store metadata
-store_features = FeatureView(
-    name="store_features",
-    entities=[store, dept],
-    ttl=timedelta(days=365),
-    schema=[
-        Field(name="store_type", dtype=String),
-        Field(name="store_size", dtype=Int32),
-    ],
-    source=FileSource(path="/shared/data/store_features.parquet", timestamp_field="event_timestamp"),
-)
-```
+![Feature Services](docs/images/FeatureServices.png)
+*Feature Services define which features are used for training vs inference.*
 
-### Create FeatureServices for training and inference
+The critical insight is creating **two FeatureServices** that share the same feature definitions but differ in one key aspect:
 
-```python
-# Training: includes target (weekly_sales)
-training_features = FeatureService(
-    name="training_features", 
-    features=[sales_features, store_features]
-)
+| Service | Purpose | Includes `weekly_sales` (Target)? |
+|---------|---------|-----------------------------------|
+| `training_features` | Historical feature retrieval for model training | **Yes** - model learns to predict this |
+| `inference_features` | Real-time feature lookup for predictions | **No** - this is what we're predicting |
 
-# Inference: excludes target—only the features model needs
-inference_features = FeatureService(
-    name="inference_features",
-    features=[
-        sales_features[["lag_1", "lag_2", "lag_4", "rolling_mean_4w", "rolling_std_4w",
-                        "week_of_year", "is_holiday", "temperature"]],
-        store_features
-    ]
-)
-```
+**Features included in both services:**
 
-> **Key insight:** In our experiments, 63% of predictive power came from lag + rolling features. Using identical Feast definitions for training and serving eliminates the feature skew that causes silent model degradation.
+| Category | Features | Importance |
+|----------|----------|------------|
+| **Target** | `weekly_sales` | Training only - the value we predict |
+| **Lag** | `lag_1`, `lag_2`, `lag_4`, `lag_8` | 35% - historical sales patterns |
+| **Rolling** | `rolling_mean_4w`, `rolling_std_4w`, `sales_vs_avg` | 28% - recent trends |
+| **Temporal** | `week_of_year`, `month`, `quarter`, `week_of_month`, `is_month_end` | 18% - seasonality |
+| **Holiday** | `is_holiday`, `days_to_holiday` | 10% - holiday effects |
+| **Economic** | `temperature`, `fuel_price`, `cpi`, `unemployment` | 7% - external factors |
+| **Store** | `store_type`, `store_size`, `region` | 2% - static metadata |
 
-### Register and materialize
-
-```bash
-# Register feature definitions in Feast
-feast apply
-
-# Materialize to online store for serving
-feast materialize 2024-01-01T00:00:00 2024-12-31T23:59:59
-```
+Both services reference the **same underlying feature definitions**, ensuring that:
+- Training and serving use identical feature computations
+- The target (`weekly_sales`) is only included during training
+- Feature updates propagate to both training and serving automatically
 
 ---
 
-## Phase 2: Scaling Feature Retrieval with Ray
-
-For datasets beyond ~100K rows, Feast's default Pandas engine becomes a bottleneck. Configure the Ray offline store to distribute point-in-time joins across your KubeRay cluster.
-
-### Configure Feast to use Ray
-
-Create `feature_repo/feature_store.yaml`:
-
-```yaml
-# feature_repo/feature_store.yaml
-project: sales_forecasting
-registry:
-  registry_type: sql
-  path: postgresql://feast:feast@postgres:5432/feast
-
-offline_store:
-  type: ray
-  use_kuberay: true
-  kuberay_conf:
-    cluster_name: feast-ray
-    namespace: feast-trainer-demo
-  enable_distributed_joins: true
-
-online_store:
-  type: postgres
-  host: postgres
-  port: 5432
-  database: feast
-  user: feast
-  password: feast
-
-batch_engine:
-  type: ray
-```
-
-> **Note:** Authentication to the Ray cluster uses [CodeFlare SDK](https://github.com/project-codeflare/codeflare-sdk) with Kubernetes service account tokens—no manual credential management required.
-
-### Performance comparison
-
-| Dataset Size | Pandas | Ray (KubeRay)* | Speedup |
-|--------------|--------|----------------|---------|
-| 65K rows     | ~2 min  | ~30 sec       | 4x |
-| 1M rows      | 30+ min | ~3 min        | 10x |
-| 10M rows     | OOM    | ~15 min        | ∞ |
-| 100M rows    | —      | ~2 hours       | — |
-
-*Benchmarks on 4-worker Ray cluster (4 CPU, 8GB RAM each). Production clusters with more workers scale linearly.*
-
-For context, **Uber processes 10M+ features per second** through their feature store, and **DoorDash's feature platform handles 10B+ feature requests daily**. The Ray backend enables this scale by sharding entity DataFrames across workers, performing parallel PIT joins, and aggregating results—all transparent to your training code.
-
-> **Why PIT joins are expensive:** Point-in-time joins prevent data leakage by ensuring training data only includes features that would have been available at prediction time. This requires sorting and binary search operations that are O(n log n)—exactly what benefits from parallelization.
-
----
-
-## Phase 3: Distributed Training with Kubeflow Training Operator
+## Phase 2: Distributed Training with Kubeflow
 
 ![Training Workflow](docs/diagrams/02-training-workflow.png)
-*Figure 4: Training workflow: Kubeflow SDK submits TrainJob → Feast+Ray retrieves features → Preprocess → PyTorch DDP training → Save model → Log to MLflow.*
+*Training workflow: Submit TrainJob → Fetch features via Feast SDK → Distributed training → Log to MLflow.*
 
-### Why Kubeflow Training Operator?
+### Why Kubeflow Trainer?
 
-Distributed training on Kubernetes is hard. Without an operator, you'd need to manually:
+Distributed training on Kubernetes is complex. Without an operator, you'd manually configure:
+- Environment variables (`MASTER_ADDR`, `WORLD_SIZE`, `RANK`) for each pod
+- Pod scheduling for network locality
+- Job lifecycle (restarts, failures, gang scheduling)
+- Headless services for pod-to-pod communication
+- Multi-GPU allocation and NCCL/RCCL configuration
+- Accelerator-specific settings (CUDA for NVIDIA, ROCm for AMD)
 
-- Configure `MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK` for each pod
-- Handle pod scheduling to ensure network locality
-- Manage job lifecycle (restarts, failures, gang scheduling)
-- Set up headless services for pod-to-pod communication
-- Configure GPU affinity and NCCL environment variables
+The **Kubeflow Trainer** handles all of this declaratively, supporting:
 
-The **Kubeflow Training Operator** handles all of this declaratively. You specify `numNodes: 2` and it figures out the rest.
+| Capability | Description |
+|------------|-------------|
+| **Multi-node training** | Scale across 2, 4, 8, or 100+ nodes |
+| **Multi-GPU per node** | Utilize all GPUs on each node (1, 2, 4, 8 GPUs) |
+| **Multi-accelerator support** | NVIDIA (CUDA/NCCL) and AMD (ROCm/RCCL) |
+| **Automatic coordination** | Environment variables and service discovery handled automatically |
 
-### Comparison with Training Orchestration Alternatives
+### Training Pattern
 
-| Approach | Multi-node | Kubernetes Native | Framework Support | Gang Scheduling |
-|----------|------------|-------------------|-------------------|-----------------|
-| Manual DDP setup | ✅ (painful) | ❌ | PyTorch only | ❌ |
-| Ray Train | ✅ | Via KubeRay | PyTorch, TF, JAX | ✅ |
-| Horovod | ✅ | Requires MPI | PyTorch, TF | ❌ |
-| SageMaker Training | ✅ | ❌ (AWS only) | PyTorch, TF | ✅ |
-| **Kubeflow Training Operator** | ✅ | ✅ | PyTorch, TF, JAX, XGBoost | ✅ |
+The training workflow follows a proven pattern:
 
-The Training Operator is used in production by **Apple, Bloomberg, Spotify, and Red Hat OpenShift AI**. It's the standard way to run distributed training on Kubernetes.
+| Step | Component | Action |
+|------|-----------|--------|
+| 1 | Kubeflow SDK | Submit TrainJob to cluster |
+| 2 | Feast SDK | Retrieve historical features via gRPC |
+| 3 | PyTorch DDP | Distribute training across nodes |
+| 4 | MLflow | Track experiments, log model |
+| 5 | Shared Storage | Save artifacts for serving |
 
-### What the Operator Does Automatically
+### MLflow Integration
 
-| Concern | Manual Approach | With Training Operator |
-|---------|-----------------|------------------------|
-| **Environment variables** | Script to set RANK, WORLD_SIZE per pod | Auto-injected based on pod index |
-| **Service discovery** | Create headless Service, configure DNS | Built-in worker discovery |
-| **Gang scheduling** | Hope pods schedule together | Integrates with Kueue, Volcano |
-| **Failure handling** | Manual restart logic | Configurable restart policies |
-| **GPU allocation** | Per-pod resource requests | `resourcesPerNode` applies uniformly |
-| **Multi-framework** | Different setup per framework | Single API for PyTorch, TensorFlow, JAX |
-
-### Create the TrainJob
-
-The new `TrainJob` API (v1alpha1) provides a clean, high-level interface:
-
-```yaml
-apiVersion: trainer.kubeflow.org/v1alpha1
-kind: TrainJob
-metadata:
-  name: sales-training
-spec:
-  runtimeRef:
-    name: torch-distributed    # Pre-configured runtime for PyTorch DDP
-  trainer:
-    image: quay.io/modh/training:py312-cuda128-torch280
-    command:
-      - python
-      - /shared/scripts/train_ddp.py
-    numNodes: 2                # Scale by changing this number
-    resourcesPerNode:
-      requests:
-        cpu: "4"
-        memory: "8Gi"
-        # nvidia.com/gpu: "1"  # Uncomment for GPU training
-    env:
-      - name: MLFLOW_TRACKING_URI
-        value: "http://mlflow:5000"
-      - name: FEAST_REPO_PATH
-        value: "/shared/feature_repo"
-    volumeMounts:
-      - name: shared
-        mountPath: /shared
-```
-
-**Key TrainJob features:**
-
-| Feature | Description |
-|---------|-------------|
-| `runtimeRef` | References a `ClusterTrainingRuntime` with pre-configured settings (NCCL, rendezvous) |
-| `numNodes` | Number of training workers—operator handles all coordination |
-| `resourcesPerNode` | Uniform resource allocation across all workers |
-| Automatic env injection | `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` set automatically |
-
-> **New in Kubeflow 1.9:** The `TrainJob` API simplifies the previous `PyTorchJob` spec while adding support for `ClusterTrainingRuntime` templates. This enables platform teams to define approved training configurations that data scientists can reference by name.
-
-### Submit via Python SDK
-
-For notebook-based workflows, the Kubeflow Training SDK provides a programmatic interface:
-
-```python
-from kubeflow.training import TrainingClient, TrainJob
-
-client = TrainingClient()
-
-# Submit training job
-client.create_job(
-    TrainJob(
-        name="sales-training",
-        runtime_ref="torch-distributed",
-        trainer={
-            "image": "quay.io/modh/training:py312-cuda128-torch280",
-            "command": ["python", "/shared/scripts/train_ddp.py"],
-            "num_nodes": 2,
-            "resources_per_node": {"cpu": "4", "memory": "8Gi"},
-        },
-    )
-)
-
-# Monitor progress
-client.get_job_logs(name="sales-training", follow=True)
-```
-
-This SDK approach is particularly powerful when combined with experiment tracking—you can programmatically sweep hyperparameters and launch multiple training jobs from a notebook.
-
-### Training script pattern
-
-The training script follows a specific pattern for distributed execution. See full implementation in [`manifests/scripts/train_ddp.py`](https://github.com/redhat-et/sales-demand-forecasting/blob/main/manifests/scripts/train_ddp.py):
-
-```python
-# manifests/scripts/train_ddp.py (simplified)
-import os
-import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import pandas as pd
-import mlflow
-from feast import FeatureStore
-
-# Initialize distributed training (env vars set by Kubeflow Training Operator)
-dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-rank = dist.get_rank()
-world_size = dist.get_world_size()
-device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', 0)}" if torch.cuda.is_available() else "cpu")
-
-# Rank 0 fetches features via Feast/Ray, saves to shared storage
-if rank == 0:
-    store = FeatureStore(repo_path="/shared/feature_repo")
-    training_df = store.get_historical_features(
-        entity_df=entity_df,
-        features=store.get_feature_service("training_features")
-    ).to_df()
-    training_df.to_parquet("/shared/models/training_data.parquet")
-
-dist.barrier()  # All ranks wait for data to be written
-
-# All ranks load identical data from shared storage
-training_df = pd.read_parquet("/shared/models/training_data.parquet")
-
-# Standard DDP training loop
-model = DDP(SalesMLP(input_dim=len(feature_cols)).to(device))
-for epoch in range(epochs):
-    train_loss = train_epoch(model, train_loader, optimizer)
-    
-    # Only rank 0 logs to MLflow (avoid duplicate logging)
-    if rank == 0:
-        mlflow.log_metrics({"train_loss": train_loss, "mape": mape}, step=epoch)
-```
-
-> **Note:** The pattern of rank 0 fetching data and all ranks reading from shared storage avoids redundant API calls while ensuring all workers train on identical data.
-
-### Scaling Training: From 2 Nodes to 100+
-
-The same `TrainJob` spec scales from local development to production clusters:
-
-| Scale | Configuration | Use Case | Bottleneck |
-|-------|---------------|----------|------------|
-| **Development** | `numNodes: 1`, CPU only | Debugging, quick iteration | Compute |
-| **Team** | `numNodes: 2-4`, GPU | Regular training runs | Compute |
-| **Production** | `numNodes: 8-64`, multi-GPU | Large models, hyperparameter sweeps | Network* |
-| **Enterprise** | `numNodes: 100+`, RDMA | Foundation model fine-tuning | Compute |
-
-*At production scale, standard Kubernetes networking (OVN) becomes the bottleneck. Red Hat's testing showed that [GPUDirect RDMA reduces fine-tuning time from 5 hours to 1.5 hours](https://developers.redhat.com/articles/2025/04/29/accelerate-model-training-openshift-ai-nvidia-gpudirect-rdma)—a **3x speedup**—by eliminating network IO as the bottleneck.*
-
-For large-scale training, the Kubeflow Training Operator integrates with:
-
-- **[Kueue](https://kueue.sigs.k8s.io/)** — Fair-share scheduling and quota management
-- **[Volcano](https://volcano.sh/)** — Gang scheduling to ensure all pods start together
-- **[NVIDIA GPUDirect RDMA](https://developers.redhat.com/articles/2025/04/29/accelerate-model-training-openshift-ai-nvidia-gpudirect-rdma)** — High-bandwidth GPU-to-GPU communication across nodes (3x speedup vs OVN network)
-
-> **Production examples from Red Hat OpenShift AI:**
-> - [Fine-tune LLMs with Kubeflow Trainer](https://developers.redhat.com/articles/2025/04/22/fine-tune-llms-kubeflow-trainer-openshift-ai) — Complete walkthrough of fine-tuning Llama 3.1 8B with PyTorch FSDP, LoRA/QLoRA, and HuggingFace SFTTrainer on OpenShift AI
-> - [Accelerate training with GPUDirect RDMA](https://developers.redhat.com/articles/2025/04/29/accelerate-model-training-openshift-ai-nvidia-gpudirect-rdma) — How NVIDIA Spectrum-X networking reduces distributed training time from 5 hours to 1.5 hours
-
-### Track experiments with MLflow
+![MLflow Workspace](docs/images/mlflow-workspace.png)
+*MLflow workspace in OpenShift AI for experiment tracking.*
 
 ![MLflow Training Runs](docs/images/mlflow-training-runs.png)
-*Figure 5: MLflow UI comparing training runs: MAPE, validation loss, learning rate schedules across CPU/GPU configurations.*
+*MLflow UI comparing training runs across different configurations.*
 
-Each training run logs:
+The MLflow Operator on OpenShift AI provides:
 
-| Category | What's Logged |
-|----------|---------------|
-| **Parameters** | hardware, world_size, epochs, batch_size, learning_rate, feature_count |
-| **Metrics** | train_loss, val_loss, mape, learning_rate (per epoch) |
-| **Artifacts** | model_best.pt, scalers.joblib, model_metadata.json |
+| Feature | Benefit |
+|---------|---------|
+| **Workspace Isolation** | Each team/project gets isolated experiment tracking |
+| **Model Registry** | Version and stage models for deployment |
+| **Artifact Storage** | Automatic model and scaler persistence |
+| **Parameter Logging** | Track hyperparameters across runs |
 
-### Results
+Each training run automatically logs parameters, metrics (loss, MAPE), and artifacts (model weights, scalers, metadata).
 
-| Metric | Our Results | Industry Benchmark* |
-|--------|-------------|---------------------|
-| **MAPE** | 3-5% | 5-10% (typical retail) |
-| **Training Time (CPU)** | 2-5 min | Hours (without DDP) |
-| **Training Time (GPU)** | 30 sec | Minutes (single GPU) |
-| **Feature Retrieval** | 30 sec | Minutes (Pandas at scale) |
-| **Online Feature Latency** | <5ms p99 | <10ms (production SLA) |
+### Scaling Training
 
-*Industry benchmarks from [Walmart's M5 competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy) and published feature store latency SLAs.*
+The same training configuration scales from development to production:
 
-> **Why 3-5% MAPE matters:** In retail, every 1% improvement in forecast accuracy can reduce inventory costs by 2-4%. For a retailer with $1B in inventory, that's **$20-40M in savings**.
+| Scale | Configuration | Use Case |
+|-------|---------------|----------|
+| **Development** | 1 node, CPU | Debugging, quick iteration |
+| **Team** | 2-4 nodes, GPU | Regular training runs |
+| **Production** | 8-64 nodes | Large models, hyperparameter sweeps |
 
 ---
 
-## Phase 4: Production Serving with KServe
+## Phase 3: Model Serving with KServe
 
 ![Inference Workflow](docs/diagrams/03-inference-workflow.png)
-*Figure 6: Inference workflow: Client sends entity IDs → KServe fetches features from Feast online store (~5ms) → Scale → Predict → Return dollar prediction.*
+*Inference workflow: Client sends entity IDs → KServe fetches features from Feast → Model predicts → Return result.*
 
-The serving layer is where feature consistency matters most. Clients send only entity IDs—KServe fetches features from Feast's online store using the same `inference_features` FeatureService.
+### The Serving Pattern
 
-### Deploy the InferenceService
+The key innovation is **Feast SDK integration** in the serving layer:
 
-```yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: sales-forecast
-spec:
-  predictor:
-    containers:
-      - name: kserve-container
-        image: quay.io/your-org/sales-forecast-server:latest
-        env:
-          - name: FEAST_SERVER_URL
-            value: "http://feast-server:6566"
-          - name: MODEL_PATH
-            value: "/mnt/models"
-        volumeMounts:
-          - name: model-volume
-            mountPath: /mnt/models
-```
+| Step | Component | Action |
+|------|-----------|--------|
+| 1 | Client | Sends entity IDs (store_id, dept_id) |
+| 2 | KServe | Receives inference request |
+| 3 | Feast SDK | Fetches features via gRPC (same as training) |
+| 4 | Model | Scales features, runs inference |
+| 5 | KServe | Returns prediction |
 
-### Implement the prediction server
+### Why This Matters
 
-The serving script is deployed via ConfigMap. Key parts:
+| Approach | Client Sends | Pros | Cons |
+|----------|--------------|------|------|
+| **Without Feast** | All features | Simple server | Feature drift, complex client |
+| **With Feast** | Entity IDs only | No drift, simple client | Requires online store |
 
-```python
-# serve.py (simplified, see full version in manifests/)
-import os
-import torch
-import numpy as np
-import joblib
-import requests
-from kserve import Model, ModelServer
+By fetching features at serving time using the **same Feast SDK** as training, we guarantee identical feature computation.
 
-FEAST_URL = os.environ.get("FEAST_SERVER_URL", "http://feast-server:6566")
+### Latency Components
 
-class SalesForecastModel(Model):
-    def __init__(self, name: str):
-        super().__init__(name)
-        self.model = None
-        self.scalers = None
-        self.ready = False
-    
-    def load(self):
-        # Load model and scalers from shared PVC
-        self.model = torch.load("/mnt/models/model_best.pt", map_location="cpu")
-        self.model.eval()
-        self.scalers = joblib.load("/mnt/models/scalers.joblib")
-        self.ready = True
+The end-to-end inference latency is composed of:
 
-    def preprocess(self, payload, headers=None):
-        entities = payload["inputs"][0]["data"]
-        
-        # Fetch from Feast online store—same FeatureService as training
-        response = requests.post(f"{FEAST_URL}/get-online-features", json={
-            "feature_service": "inference_features",  # Same definition used in training
-            "entities": {
-                "store_id": [e["store_id"] for e in entities],
-                "dept_id": [e["dept_id"] for e in entities]
-            }
-        })
-        return self._parse_features(response.json())
+| Component | Description |
+|-----------|-------------|
+| Feast online store lookup | Redis-backed feature retrieval |
+| Feature scaling | NumPy vectorized operations |
+| Model inference | PyTorch forward pass |
 
-    def predict(self, X, headers=None):
-        X_scaled = self.scalers["scaler_X"].transform(X)
-        with torch.no_grad():
-            preds = self.model(torch.FloatTensor(X_scaled)).numpy()
-        # Inverse transform: log1p was applied during training
-        return np.expm1(self.scalers["scaler_y"].inverse_transform(
-            preds.reshape(-1, 1)
-        )).flatten()
-
-if __name__ == "__main__":
-    model = SalesForecastModel("sales-forecast")
-    model.load()
-    ModelServer().start([model])
-```
-
-### Test predictions
-
-```bash
-curl -X POST http://sales-forecast/v2/models/sales-forecast/infer \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": [{"name": "entities", "data": [{"store_id": 1, "dept_id": 3}]}]}'
-
-# Response: {"outputs": [{"name": "predictions", "data": [96763.45]}]}
-```
-
-### Latency breakdown
-
-| Component | Latency | Notes |
-|-----------|---------|-------|
-| Feast online store lookup | ~2-5ms | PostgreSQL with connection pooling |
-| Feature scaling | <1ms | NumPy vectorized operations |
-| Model inference | ~1-2ms | PyTorch CPU (MLP is lightweight) |
-| **Total p99** | **<10ms** | Well within production SLAs |
-
-For comparison, **Uber targets <10ms p99 for feature serving**, and **DoorDash's feature store serves at <5ms p50**. The PostgreSQL-backed online store achieves similar performance for moderate QPS (1000s of requests/second).
+Using Redis as the online store ensures low-latency feature retrieval suitable for real-time serving.
 
 ---
 
-## Deploy the Complete Pipeline
+## Benefits
 
-### Step 1: Clone the repository
-
-```bash
-git clone https://github.com/redhat-et/sales-demand-forecasting
-cd sales-demand-forecasting
-```
-
-### Step 2: Deploy infrastructure
-
-```bash
-kubectl apply -k manifests/
-```
-
-**Wait for pods to be ready** (~2-3 minutes):
-
-```bash
-kubectl get pods -w
-```
-
-**Expected output:**
-```
-NAME                           READY   STATUS    
-postgres-0                     1/1     Running   
-mlflow-...                     1/1     Running   
-feast-ray-head-...             1/1     Running   
-feast-ray-worker-...           1/1     Running   
-feast-server-...               1/1     Running   
-```
-
-### Step 3: Prepare data and register features
-
-```bash
-kubectl apply -f manifests/05-dataprep-job.yaml
-```
-
-**Monitor progress:**
-```bash
-kubectl logs -f job/feast-dataprep
-```
-
-**Expected output:**
-```
-Generating 65,520 rows of sales data...
-Running feast apply...
-Created entity store_id
-Created entity dept_id
-Created feature view sales_features
-Created feature view store_features
-Created feature service training_features
-Created feature service inference_features
-Running feast materialize...
-Materializing 65,520 rows to online store...
-Done!
-```
-
-### Step 4: Train the model
-
-```bash
-kubectl apply -f manifests/06-trainjob.yaml
-```
-
-**Monitor training:**
-```bash
-kubectl logs -f sales-training-node-0-0
-```
-
-**Expected output:**
-```
-============================================================
-  TRAINING CONFIGURATION
-============================================================
-PyTorch: 2.8.0
-Hardware: CPU (or CUDA if GPUs available)
-Distributed: True (world_size=2)
-============================================================
-  FEATURE RETRIEVAL (Feast + KubeRay)
-============================================================
-Querying 65,520 entities...
-Retrieved 65,520 rows in 28.3s
-============================================================
-  MODEL TRAINING
-============================================================
-Epoch   Train       Val         MAPE      LR          Status
---------------------------------------------------------------
-1       0.892341    0.743219    8.42      1.00e-03    
-2       0.654123    0.612847    6.21      1.00e-03    
-...
-15      0.089234    0.091823    3.47      1.00e-04    * best
-============================================================
-  TRAINING COMPLETE
-============================================================
-Best MAPE:   3.47% (epoch 15)
-Train time:  127.4s
-```
-
-### Step 5: Deploy inference service
-
-```bash
-kubectl apply -f manifests/08-kserve-inference.yaml
-```
-
-**Wait for InferenceService to be ready:**
-```bash
-kubectl get inferenceservice sales-forecast -w
-```
-
-**Expected output:**
-```
-NAME             URL                                      READY
-sales-forecast   http://sales-forecast.default.svc...     True
-```
-
-### Step 6: Test predictions
-
-```bash
-# Get the service URL
-INGRESS=$(kubectl get inferenceservice sales-forecast -o jsonpath='{.status.url}')
-
-# Make a prediction
-curl -X POST "$INGRESS/v2/models/sales-forecast/infer" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": [{"name": "entities", "data": [{"store_id": 1, "dept_id": 3}]}]}'
-```
-
-**Expected output:**
-```json
-{"outputs": [{"name": "predictions", "data": [96763.45]}]}
-```
-
-### Step 7: Access UIs
-
-```bash
-# MLflow UI (experiment tracking)
-kubectl port-forward svc/mlflow 5000:5000 &
-open http://localhost:5000
-
-# Feast UI (feature lineage)
-kubectl port-forward svc/feast-server 8888:8888 &
-open http://localhost:8888
-```
-
----
-
-## Troubleshooting
-
-| Issue | Symptom | Solution |
-|-------|---------|----------|
-| **Pods stuck in Pending** | `kubectl get pods` shows Pending | Check PVC binding: `kubectl get pvc`. Ensure StorageClass supports RWX. |
-| **Ray workers not connecting** | Training hangs at "Connecting to Ray..." | Verify Ray cluster: `kubectl get rayclusters`. Check Ray head logs. |
-| **Feast materialize fails** | "Connection refused" to PostgreSQL | Wait for postgres pod: `kubectl wait --for=condition=ready pod/postgres-0` |
-| **Training OOM** | Pod killed with exit code 137 | Reduce `BATCH_SIZE` env var or increase `memory` in TrainJob |
-| **KServe not ready** | InferenceService stuck at "Unknown" | Check predictor logs: `kubectl logs -l serving.kserve.io/inferenceservice=sales-forecast` |
+| Area | Benefit |
+|------|---------|
+| **Feature Consistency** | Same feature definitions for training and serving eliminates skew |
+| **Scalability** | Ray distributes feature retrieval; Kubeflow distributes training |
+| **Reduced Training Time** | Multi-node DDP significantly reduces iteration time vs single-node |
+| **Low-Latency Serving** | Redis online store enables real-time predictions |
+| **Reproducibility** | MLflow tracks all experiments, parameters, and artifacts |
 
 ---
 
@@ -757,84 +298,81 @@ open http://localhost:8888
 
 | Decision | Benefit |
 |----------|---------|
-| **Feast as single source of truth** | Same `FeatureService` for training + serving = no skew |
-| **Ray offline store** | Scales PIT joins from 65K to 10M+ rows |
-| **Shared PVC** | No S3/artifact copying—all components read/write `/shared` |
-| **Separate FeatureServices** | `training_features` includes target; `inference_features` excludes it |
-| **DDP + rank 0 pattern** | One feature fetch, all workers train on identical data |
+| **Feast as single source of truth** | Same FeatureService for training + serving = no skew |
+| **Feast Operator** | Automated infrastructure, secure gRPC communication |
+| **Ray offline store** | Scales point-in-time joins from thousands to millions of rows |
+| **Kubeflow Trainer** | Declarative distributed training, no manual coordination |
+| **MLflow Operator** | Workspace isolation, model versioning |
+| **KServe + Feast SDK** | Consistent feature retrieval at inference time |
 
-### Comparison with Industry Alternatives
+### Comparison with Alternatives
 
-| Approach | Scales | No Skew | Open Source | Vendor Lock-in | Typical Users |
-|----------|--------|---------|-------------|----------------|---------------|
-| Pandas + custom serving | ❌ | ❌ | ✅ | None | Startups, POCs |
-| Spark + custom serving | ✅ | ❌ | ✅ | None | Data teams without ML Ops |
-| **Tecton** | ✅ | ✅ | ❌ | High | Enterprise (DoorDash, Atlassian) |
-| **Vertex AI Feature Store** | ✅ | ✅ | ❌ | GCP | Google Cloud users |
-| **SageMaker Feature Store** | ✅ | ✅ | ❌ | AWS | AWS users |
-| **Databricks Feature Store** | ✅ | ✅ | ❌ | Databricks | Databricks users |
-| **Feast + Ray + Kubeflow + KServe** | ✅ | ✅ | ✅ | None | Multi-cloud, on-prem |
+| Approach | Scales | No Skew | Open Source | Vendor Lock-in |
+|----------|--------|---------|-------------|----------------|
+| Pandas + custom serving | ❌ | ❌ | ✅ | None |
+| **Tecton** | ✅ | ✅ | ❌ | High |
+| **Vertex AI Feature Store** | ✅ | ✅ | ❌ | GCP |
+| **SageMaker Feature Store** | ✅ | ✅ | ❌ | AWS |
+| **This Architecture** | ✅ | ✅ | ✅ | None |
 
-The open-source stack provides the same capabilities as managed services while running on any Kubernetes cluster—cloud, on-prem, or hybrid.
-
-### Production Considerations
-
-| Concern | How This Architecture Addresses It |
-|---------|-----------------------------------|
-| **High availability** | PostgreSQL (registry/online store) supports replication; KServe handles pod failures |
-| **Disaster recovery** | Feature definitions are code (GitOps); data in Parquet can be backed up |
-| **Cost optimization** | Ray workers scale to zero when idle; KServe scales inference pods based on load |
-| **Monitoring** | MLflow tracks model drift; Feast provides feature freshness metrics |
-| **Security** | Kubernetes RBAC for access control; no external API keys required |
-| **Multi-tenancy** | Feast projects isolate feature namespaces; Kubernetes namespaces isolate workloads |
+The open-source stack provides managed-service capabilities while running on any Kubernetes cluster.
 
 ---
 
 ## Conclusion
 
-This article walked through building a production ML pipeline using open source tools that compose rather than compete:
+Feature stores aren't just about organizing data—they're about **preventing the silent failures that plague production ML systems**.
 
-| Concern | Tool | Production Benefit |
-|---------|------|-------------------|
-| Feature definitions + storage | Feast | Single source of truth eliminates skew |
-| Distributed feature retrieval | Ray (KubeRay) | Scales from 65K to 100M+ rows |
-| Multi-node training | Kubeflow Training Operator | GPU utilization, faster iteration |
-| Experiment tracking | MLflow | Reproducibility, model governance |
-| Auto-scaling serving | KServe | Cost efficiency, high availability |
-
-### The Bottom Line
-
-Feature stores aren't just about organizing data—they're about **preventing the silent failures that plague production ML systems**. Companies like Uber, DoorDash, and Instacart learned this the hard way before building their feature platforms.
-
-The architecture in this article provides:
+This architecture provides:
 
 - **Zero training-serving skew** by construction (same FeatureService definitions)
-- **Horizontal scalability** from prototype (65K rows) to production (100M+ rows)
-- **No vendor lock-in**—runs on any Kubernetes cluster
-- **GitOps-friendly**—feature definitions are version-controlled Python code
+- **Horizontal scalability** from prototype to production
+- **No vendor lock-in** — runs on any Kubernetes cluster
+- **GitOps-friendly** — feature definitions are version-controlled
 
 The key insight: **feature consistency between training and serving** is the foundation everything else builds on. Get this wrong, and no amount of model tuning will save you. Get it right, and you have a platform that scales with your business.
-
-Try the [complete implementation](https://github.com/redhat-et/sales-demand-forecasting) and see how these components work together in practice.
 
 ---
 
 ## Resources
 
-**This project:**
-- [Complete source code on GitHub](https://github.com/redhat-et/sales-demand-forecasting)
+**Foundational Research:**
+- [Hidden Technical Debt in Machine Learning Systems](https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf) — Google's seminal NIPS 2015 paper on ML systems maintenance
+- [Rules of ML: Best Practices for ML Engineering](https://developers.google.com/machine-learning/guides/rules-of-ml) — Google's comprehensive guide to production ML
+- [MLOps: Continuous delivery and automation pipelines](https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning) — Google Cloud Architecture Center
+- [MLOps Maturity Model](https://learn.microsoft.com/en-us/azure/architecture/ai-ml/guide/mlops-maturity-model) — Microsoft's framework for assessing ML operations maturity
 
-**Kubeflow Training on OpenShift AI:**
-- [Fine-tune LLMs with Kubeflow Trainer on OpenShift AI](https://developers.redhat.com/articles/2025/04/22/fine-tune-llms-kubeflow-trainer-openshift-ai) — Step-by-step guide for Llama 3.1 fine-tuning with FSDP
-- [Accelerate model training with NVIDIA GPUDirect RDMA](https://developers.redhat.com/articles/2025/04/29/accelerate-model-training-openshift-ai-nvidia-gpudirect-rdma) — 3x speedup with high-performance networking
+**Industry Case Studies & Engineering Blogs:**
+- [Uber Michelangelo ML Platform](https://www.uber.com/blog/michelangelo-machine-learning-platform/) — Uber's approach to feature consistency
+- [DoorDash Feature Store with Redis](https://doordash.engineering/2020/11/19/building-a-gigascale-ml-feature-store-with-redis/) — Building a gigascale feature store
+- [Netflix Distributed Time Travel](https://netflixtechblog.com/distributed-time-travel-for-feature-generation-389cccdd3907) — Feature generation for offline testing
+- [Airbnb Chronon Framework](https://medium.com/airbnb-engineering/chronon-a-declarative-feature-engineering-framework-b7b8ce796e04) — Declarative feature engineering
+- [Atlassian Feature Platform Case Study](https://tecton.ai/customers/atlassian) — Reducing deployment time from months to days
 
-**Component documentation:**
+**Retail Forecasting:**
+- [M5 Forecasting Competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy) — The largest retail forecasting benchmark (42,840 time series)
+- [Walmart Store Sales Forecasting](https://www.kaggle.com/c/walmart-recruiting-store-sales-forecasting) — Classic Kaggle demand forecasting challenge
+- [IHL Group Inventory Distortion Research](https://www.ihlservices.com/news/analyst-corner/2025/09/retail-inventory-crisis-persists-despite-172-billion-in-improvements/) — \$1.77 trillion annual retail losses
+
+**OpenShift AI Documentation:**
+- [Red Hat OpenShift AI](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai)
+- [Red Hat OpenShift AI Self-Managed Documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.2)
+- [AI on OpenShift patterns and recipes](https://ai-on-openshift.io/)
+
+**Kubeflow Training:**
+- [Fine-tune LLMs with Kubeflow Trainer on OpenShift AI](https://developers.redhat.com/articles/2025/04/22/fine-tune-llms-kubeflow-trainer-openshift-ai)
+- [Accelerate training with NVIDIA GPUDirect RDMA](https://developers.redhat.com/articles/2025/04/29/accelerate-model-training-openshift-ai-nvidia-gpudirect-rdma)
+
+**OpenShift AI Component Documentation:**
+- [Working with Machine Learning Features (Feast)](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/2.25/html/working_with_machine_learning_features/index) — Feature Store on OpenShift AI
+- [Distributed Workloads (Ray & Kubeflow)](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/2.19/html/working_with_distributed_workloads/index) — Distributed training on OpenShift AI
+- [Deploying Models on Single-Model Serving Platform](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/2.25/html/deploying_models/deploying_models_on_the_single_model_serving_platform) — KServe on OpenShift AI
+- [Configuring Model-Serving Platform](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/2.25/html/configuring_your_model-serving_platform/customizing_model_deployments) — Runtime and serving configuration
+
+**Upstream Project Documentation:**
 - [Feast Documentation](https://docs.feast.dev/)
-- [KubeRay Documentation](https://docs.ray.io/en/latest/cluster/kubernetes.html)
-- [Kubeflow Training Operator](https://www.kubeflow.org/docs/components/training/)
+- [KubeRay Documentation](https://docs.ray.io/en/latest/cluster/kubernetes/index.html)
+- [Kubeflow Trainer](https://www.kubeflow.org/docs/components/training/)
 - [MLflow Documentation](https://mlflow.org/docs/latest/)
 - [KServe Documentation](https://kserve.github.io/website/)
-
-**Additional resources:**
-- [Red Hat OpenShift AI](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai)
-- [AI on OpenShift patterns and recipes](https://ai-on-openshift.io/)
+- [PyTorch Distributed Data Parallel (DDP)](https://pytorch.org/docs/stable/notes/ddp.html) — Multi-GPU training documentation

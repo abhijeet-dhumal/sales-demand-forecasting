@@ -1,0 +1,144 @@
+# Sales Forecasting Multi-Node Training Job
+#
+# Uses built-in torch-distributed ClusterTrainingRuntime for DDP training with:
+# - Kubeflow TrainJob for multi-node orchestration (uses torchrun)
+# - Feast SDK (gRPC) for feature retrieval via operator-provided ConfigMaps
+# - MLflow for experiment tracking
+# - Training script mounted from ConfigMap
+#
+# Prerequisites:
+#   - Infrastructure deployed: oc apply -k manifests/
+#   - Feast FeatureStore CR deployed (provides client ConfigMaps)
+#   - Training script ConfigMap applied: oc apply -f training-script-configmap.yaml
+#
+# Usage:
+#   oc apply -f manifests/training/training-script-configmap.yaml
+#   oc apply -f manifests/training/trainjob.yaml
+#   oc logs -f -l trainer.kubeflow.org/trainjob-name=sales-training
+#
+---
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-training
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-training
+    pipeline: sales-forecasting
+spec:
+  runtimeRef:
+    name: torch-distributed
+    kind: ClusterTrainingRuntime
+  trainer:
+    image: quay.io/modh/training:py312-cuda128-torch280
+    numNodes: 2
+    numProcPerNode: 1
+    resourcesPerNode:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+    env:
+    # Feast remote client config (operator-provided)
+    - name: FEAST_CONFIG_PATH
+      value: /opt/app-root/src/feast-config/salesforecasting
+    # Force CPU training (avoids NCCL GPU issues in multi-node without proper GPU allocation)
+    - name: CUDA_VISIBLE_DEVICES
+      value: ""
+    # Output paths
+    - name: OUTPUT_DIR
+      value: /shared/models
+    - name: NAMESPACE
+      value: feast-trainer-demo
+    # Training hyperparameters
+    - name: NUM_EPOCHS
+      value: "50"
+    - name: BATCH_SIZE
+      value: "512"
+    - name: LEARNING_RATE
+      value: "0.001"
+    - name: EARLY_STOP_PATIENCE
+      value: "5"
+    # MLflow config
+    - name: MLFLOW_TRACKING_URI
+      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+    - name: MLFLOW_EXPERIMENT_NAME
+      value: "sales-forecasting-ddp"
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      echo "============================================================"
+      echo "SALES FORECASTING - MULTI-NODE DDP TRAINING"
+      echo "PET_NNODES=$PET_NNODES PET_NODE_RANK=$PET_NODE_RANK"
+      echo "PET_MASTER_ADDR=$PET_MASTER_ADDR PET_MASTER_PORT=$PET_MASTER_PORT"
+      echo "Feast Config: $FEAST_CONFIG_PATH"
+      echo "============================================================"
+      
+      # Install dependencies
+      pip install --quiet --target=/tmp/pylibs \
+        "feast[postgres]==0.61.0" \
+        psycopg2-binary \
+        scikit-learn \
+        joblib \
+        mlflow
+      
+      export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
+      export PYTHONUNBUFFERED=1
+      
+      # Verify imports
+      python -c "import torch; print(f'PyTorch {torch.__version__} loaded')"
+      python -c "from feast import FeatureStore; print('Feast SDK loaded')"
+      
+      # Launch distributed training
+      python -m torch.distributed.run \
+        --nnodes=$PET_NNODES \
+        --nproc_per_node=$PET_NPROC_PER_NODE \
+        --node_rank=$PET_NODE_RANK \
+        --master_addr=$PET_MASTER_ADDR \
+        --master_port=$PET_MASTER_PORT \
+        /scripts/train_ddp.py
+  podTemplateOverrides:
+  - targetJobs:
+    - name: node
+    spec:
+      serviceAccountName: feast-sa
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: shared
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      - name: training-scripts
+        configMap:
+          name: training-scripts
+          defaultMode: 0755
+      - name: feast-config
+        configMap:
+          name: feast-salesforecasting-client
+      - name: feast-ca
+        configMap:
+          name: feast-salesforecasting-client-ca
+          items:
+          - key: service-ca.crt
+            path: ca-bundle.crt
+      containers:
+      - name: node
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /shared
+        - name: dshm
+          mountPath: /dev/shm
+        - name: training-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: feast-config
+          mountPath: /opt/app-root/src/feast-config/salesforecasting
+        - name: feast-ca
+          mountPath: /etc/pki/tls/custom-certs
+          readOnly: true

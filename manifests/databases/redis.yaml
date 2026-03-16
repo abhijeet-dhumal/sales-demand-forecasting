@@ -1,0 +1,67 @@
+# Redis - Feast Online Store
+#
+# Provides low-latency feature serving (<1ms) for inference
+#
+# Used by:
+#   - Feast: Online Store (type: redis)
+#
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: online-store
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: bitnami/redis:latest
+        ports:
+        - containerPort: 6379
+        env:
+        - name: ALLOW_EMPTY_PASSWORD
+          value: "yes"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: redis
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+  selector:
+    app: redis

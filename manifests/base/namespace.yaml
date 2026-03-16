@@ -1,0 +1,9 @@
+# Namespace for Sales Forecasting MLOps Pipeline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast-mlops
+    app.kubernetes.io/part-of: sales-forecasting-mlops

@@ -1,0 +1,124 @@
+# Feast Feature Store Setup (Data Preparation)
+#
+# This Job prepares the Feast Feature Store:
+# 1. Generates synthetic sales data (parquet files)
+# 2. Creates Feast project with feature definitions
+# 3. feast apply - registers features to PostgreSQL registry
+# 4. feast materialize - populates online store
+# 5. Verifies online feature retrieval
+#
+# Architecture:
+# - Registry: PostgreSQL (SQL-based, durable)
+# - Offline Store: Ray (distributed compute)
+# - Online Store: PostgreSQL (low-latency serving)
+#
+# Prerequisites:
+#   - Infrastructure deployed: oc apply -k manifests/
+#   - Scripts ConfigMap applied: oc apply -f dataprep-scripts-configmap.yaml
+#
+# Usage:
+#   oc apply -f manifests/training/dataprep-scripts-configmap.yaml
+#   oc apply -f manifests/training/dataprep-job.yaml
+#   oc logs -f job/feast-dataprep -n feast-trainer-demo
+#
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: feast-dataprep
+  namespace: feast-trainer-demo
+  labels:
+    app: feast-dataprep
+    pipeline: sales-forecasting
+    component: feature-engineering
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: feast-dataprep
+        pipeline: sales-forecasting
+    spec:
+      serviceAccountName: feast-sa
+      restartPolicy: Never
+      initContainers:
+      - name: install-deps
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        command:
+        - pip
+        - install
+        - --target=/pylibs
+        - -q
+        - feast[postgres,ray]==0.61.0
+        - codeflare-sdk
+        - psycopg2-binary
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+      containers:
+      - name: feast-dataprep
+        image: quay.io/modh/ray:2.52.1-py312-cu128
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+        env:
+        - name: PYTHONPATH
+          value: /pylibs
+        - name: PATH
+          value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        - name: POSTGRES_HOST
+          value: "postgres.feast-trainer-demo.svc.cluster.local"
+        - name: FEAST_RAY_USE_KUBERAY
+          value: "true"
+        - name: FEAST_RAY_CLUSTER_NAME
+          value: "feast-ray"
+        - name: FEAST_RAY_NAMESPACE
+          value: "feast-trainer-demo"
+        - name: FEAST_RAY_SKIP_TLS
+          value: "true"
+        - name: DATA_DIR
+          value: "/shared/data"
+        - name: FEATURE_REPO_DIR
+          value: "/shared/feature_repo"
+        - name: DATA_CONFIG
+          value: '{"start_date": "2022-01-01", "weeks": 104, "stores": 45, "departments": 14, "seed": 42}'
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: pylibs
+          mountPath: /pylibs
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "============================================================"
+          echo "FEAST FEATURE STORE SETUP"
+          echo "============================================================"
+          
+          # Setup in-cluster auth for CodeFlare SDK
+          export FEAST_RAY_AUTH_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          export FEAST_RAY_AUTH_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+          echo "In-cluster auth configured"
+          
+          # Run Feast workflow
+          bash /scripts/run.sh
+      volumes:
+      - name: pylibs
+        emptyDir: {}
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: shared
+      - name: scripts
+        configMap:
+          name: feast-dataprep-scripts
+          defaultMode: 0755

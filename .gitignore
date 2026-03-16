@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Kubernetes Secrets
+# These files contain sensitive credentials - use *.example.yaml templates
+manifests/databases/postgres-secret.yaml
+manifests/mlflow/mlflow-secrets.yaml
+manifests/feast/feast-secrets.yaml
+
+# Generic secret patterns
+*-secret.yaml
+*-secrets.yaml
+!*-secret.example.yaml
+!*-secrets.example.yaml

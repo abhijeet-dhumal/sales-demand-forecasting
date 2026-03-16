@@ -1,0 +1,310 @@
+# Training script ConfigMap for Kubeflow TrainJob
+#
+# This ConfigMap contains the training script for distributed training.
+# Mirrors the logic in notebooks/02_training/training_script.py
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: training-scripts
+  namespace: feast-trainer-demo
+  labels:
+    app: sales-forecasting
+data:
+  train_ddp.py: |
+    #!/usr/bin/env python3
+    """
+    Distributed Training Script for Sales Forecasting
+    
+    Standalone script for Kubeflow TrainJob (torchrun launcher).
+    Uses Feast SDK (gRPC) for feature retrieval, PyTorch DDP for distributed training,
+    and MLflow for experiment tracking.
+    """
+    import os
+    import json
+    import time
+    import numpy as np
+    import pandas as pd
+    import torch
+    import torch.nn as nn
+    import torch.distributed as dist
+    import joblib
+    import mlflow
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, Dataset, DistributedSampler
+    from sklearn.preprocessing import StandardScaler
+    from datetime import datetime, timezone, timedelta
+    
+    # =========================================================================
+    # Configuration from environment
+    # =========================================================================
+    EPOCHS = int(os.getenv("NUM_EPOCHS", "50"))
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "512"))
+    LEARNING_RATE = float(os.getenv("LEARNING_RATE", "0.001"))
+    EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE", "5"))
+    OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/shared/models")
+    FEAST_CONFIG_PATH = os.getenv("FEAST_CONFIG_PATH", "/opt/app-root/src/feast-config/salesforecasting")
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.feast-trainer-demo.svc.cluster.local:5000")
+    MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "sales-forecasting-ddp")
+    NAMESPACE = os.getenv("NAMESPACE", "feast-trainer-demo")
+    
+    # =========================================================================
+    # Model and Dataset classes
+    # =========================================================================
+    class MLP(nn.Module):
+        """Multi-layer perceptron for sales forecasting."""
+        def __init__(self, inp, hidden=[512, 256, 128, 64], drop=0.3):
+            super().__init__()
+            layers = []
+            for h in hidden:
+                layers.extend([nn.Linear(inp, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(drop)])
+                inp = h
+            layers.append(nn.Linear(inp, 1))
+            self.net = nn.Sequential(*layers)
+        
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+    
+    class DS(Dataset):
+        """PyTorch Dataset for sales data."""
+        def __init__(self, X, y):
+            self.X = torch.tensor(X, dtype=torch.float32)
+            self.y = torch.tensor(y, dtype=torch.float32)
+        
+        def __len__(self):
+            return len(self.X)
+        
+        def __getitem__(self, i):
+            return self.X[i], self.y[i]
+    
+    # =========================================================================
+    # Main training logic
+    # =========================================================================
+    def main():
+        # Initialize distributed training
+        dist.init_process_group(backend="gloo")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        is_main = (rank == 0)
+        
+        if is_main:
+            print(f"{'='*60}")
+            print(f"SALES FORECASTING - DISTRIBUTED TRAINING")
+            print(f"Rank {rank}/{world_size}, Epochs: {EPOCHS}")
+            print(f"Feast config: {FEAST_CONFIG_PATH}")
+            print(f"MLflow: {MLFLOW_TRACKING_URI}")
+            print(f"{'='*60}")
+        
+        # =========================================================================
+        # Feature retrieval from Feast
+        # =========================================================================
+        if is_main:
+            print("Loading features from Feast...")
+            from feast import FeatureStore
+            
+            store = FeatureStore(repo_path=FEAST_CONFIG_PATH)
+            
+            # Build entity DataFrame for historical features
+            stores = list(range(1, 46))
+            depts = list(range(1, 15))
+            
+            # Generate date range for training data
+            dates = pd.date_range("2010-02-05", "2012-10-26", freq="W-FRI")
+            
+            entity_df = pd.DataFrame([
+                {"store_id": s, "dept_id": d, "event_timestamp": ts}
+                for s in stores for d in depts for ts in dates
+            ])
+            
+            print(f"Retrieving {len(entity_df)} feature rows...")
+            
+            # Get historical features
+            feature_data = store.get_historical_features(
+                entity_df=entity_df,
+                features=store.get_feature_service("training_features")
+            ).to_df()
+            
+            # Drop rows with missing target
+            feature_data = feature_data.dropna(subset=["weekly_sales"])
+            print(f"Training data: {len(feature_data)} samples")
+            
+            # Prepare features and target
+            feature_cols = [c for c in feature_data.columns 
+                          if c not in ["store_id", "dept_id", "event_timestamp", "weekly_sales"]]
+            
+            X = feature_data[feature_cols].fillna(0).values.astype(np.float32)
+            y = feature_data["weekly_sales"].values.astype(np.float32)
+            
+            # Train/val split (80/20)
+            n = len(X)
+            idx = np.random.permutation(n)
+            split = int(0.8 * n)
+            train_idx, val_idx = idx[:split], idx[split:]
+            
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            
+            # Fit scalers
+            scaler_X = StandardScaler().fit(X_train)
+            scaler_y = StandardScaler().fit(y_train.reshape(-1, 1))
+            
+            X_train = scaler_X.transform(X_train)
+            X_val = scaler_X.transform(X_val)
+            y_train = scaler_y.transform(y_train.reshape(-1, 1)).flatten()
+            y_val = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
+            
+            # Save scalers and metadata
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            joblib.dump({"scaler_X": scaler_X, "scaler_y": scaler_y}, f"{OUTPUT_DIR}/scalers.joblib")
+            
+            metadata = {
+                "input_dim": X_train.shape[1],
+                "feature_columns": feature_cols,
+                "hidden_dims": [512, 256, 128, 64],
+                "dropout": 0.3,
+                "n_train": len(X_train),
+                "n_val": len(X_val),
+            }
+            with open(f"{OUTPUT_DIR}/model_metadata.json", "w") as f:
+                json.dump(metadata, f, indent=2)
+            
+            # Convert to tensors for broadcast
+            data_tensors = {
+                "X_train": torch.tensor(X_train),
+                "y_train": torch.tensor(y_train),
+                "X_val": torch.tensor(X_val),
+                "y_val": torch.tensor(y_val),
+                "input_dim": torch.tensor([X_train.shape[1]]),
+            }
+        else:
+            data_tensors = None
+        
+        # Broadcast data to all ranks
+        if is_main:
+            shapes = {k: v.shape for k, v in data_tensors.items()}
+        else:
+            shapes = None
+        
+        shapes = [shapes]
+        dist.broadcast_object_list(shapes, src=0)
+        shapes = shapes[0]
+        
+        if not is_main:
+            data_tensors = {k: torch.zeros(s) for k, s in shapes.items()}
+        
+        for k in data_tensors:
+            dist.broadcast(data_tensors[k], src=0)
+        
+        X_train = data_tensors["X_train"].numpy()
+        y_train = data_tensors["y_train"].numpy()
+        X_val = data_tensors["X_val"].numpy()
+        y_val = data_tensors["y_val"].numpy()
+        input_dim = int(data_tensors["input_dim"].item())
+        
+        # =========================================================================
+        # Model and training setup
+        # =========================================================================
+        model = MLP(input_dim)
+        model = DDP(model)
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+        criterion = nn.MSELoss()
+        
+        train_ds = DS(X_train, y_train)
+        val_ds = DS(X_val, y_val)
+        
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sampler, num_workers=2)
+        val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+        
+        # =========================================================================
+        # MLflow setup (main rank only)
+        # =========================================================================
+        if is_main:
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+            mlflow.start_run(run_name=f"ddp-{world_size}nodes-{datetime.now().strftime('%Y%m%d-%H%M')}")
+            mlflow.log_params({
+                "epochs": EPOCHS,
+                "batch_size": BATCH_SIZE,
+                "learning_rate": LEARNING_RATE,
+                "world_size": world_size,
+                "input_dim": input_dim,
+                "hidden_dims": [512, 256, 128, 64],
+                "dropout": 0.3,
+            })
+        
+        # =========================================================================
+        # Training loop
+        # =========================================================================
+        best_val_loss = float("inf")
+        patience_counter = 0
+        
+        for epoch in range(EPOCHS):
+            train_sampler.set_epoch(epoch)
+            model.train()
+            train_loss = 0.0
+            
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                pred = model(X_batch)
+                loss = criterion(pred, y_batch)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * len(X_batch)
+            
+            train_loss /= len(train_ds)
+            
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for X_batch, y_batch in val_loader:
+                    pred = model(X_batch)
+                    val_loss += criterion(pred, y_batch).item() * len(X_batch)
+            val_loss /= len(val_ds)
+            
+            # Aggregate losses across ranks
+            train_loss_tensor = torch.tensor([train_loss])
+            val_loss_tensor = torch.tensor([val_loss])
+            dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.AVG)
+            dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
+            train_loss = train_loss_tensor.item()
+            val_loss = val_loss_tensor.item()
+            
+            scheduler.step(val_loss)
+            
+            if is_main:
+                print(f"Epoch {epoch+1}/{EPOCHS}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
+                mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss}, step=epoch)
+                
+                # Save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    torch.save(model.module.state_dict(), f"{OUTPUT_DIR}/best_model.pt")
+                    print(f"  → New best model saved (val_loss={val_loss:.4f})")
+                else:
+                    patience_counter += 1
+                
+                # Early stopping
+                if patience_counter >= EARLY_STOP_PATIENCE:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+        
+        # =========================================================================
+        # Finalize
+        # =========================================================================
+        if is_main:
+            mlflow.log_metric("best_val_loss", best_val_loss)
+            mlflow.log_artifacts(OUTPUT_DIR)
+            mlflow.end_run()
+            print(f"\nTraining complete. Best val_loss: {best_val_loss:.4f}")
+            print(f"Artifacts saved to: {OUTPUT_DIR}")
+        
+        dist.destroy_process_group()
+    
+    
+    if __name__ == "__main__":
+        main()

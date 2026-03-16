@@ -1,0 +1,198 @@
+# MLflow Server using OpenShift AI Native Operator
+#
+# Prerequisites:
+# - OpenShift AI installed with MLflow Operator enabled
+# - PostgreSQL deployed in feast-trainer-demo namespace
+# - 'mlflow' database created in PostgreSQL
+#
+# Components:
+# 1. MLflow CR - Managed by OpenShift AI MLflow Operator (cluster-scoped)
+# 2. PostgreSQL Secret - Connection string for MLflow backend
+# 3. OAuth Proxy - Enables browser-based UI access with OpenShift authentication
+#
+# Access:
+#   UI: https://mlflow-ui-redhat-ods-applications.apps.<cluster>/
+#   SDK (from workbench): https://mlflow.redhat-ods-applications.svc.cluster.local:8443
+#
+# Database Setup (run once):
+#   oc exec -n feast-trainer-demo $(oc get pod -n feast-trainer-demo -l app=postgres -o name) -- \
+#     psql -U feast -d feast -c "CREATE DATABASE mlflow;"
+#
+---
+# MLflow Custom Resource - Managed by OpenShift AI Operator
+# Note: This is a cluster-scoped resource
+apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec:
+  # Use PVC for artifacts (no S3/MinIO required)
+  artifactsDestination: "file:///mlflow/artifacts"
+  serveArtifacts: true
+  
+  # PostgreSQL backend store
+  backendStoreUriFrom:
+    key: uri
+    name: mlflow-postgres-secret
+  
+  # PVC storage for artifacts
+  storage:
+    accessModes: ["ReadWriteOnce"]
+    resources:
+      requests:
+        storage: 20Gi
+  
+  # Resource allocation
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  
+  replicas: 1
+  workers: 1
+---
+# PostgreSQL connection secret for MLflow
+# Note: Must be in redhat-ods-applications namespace (where operator deploys MLflow)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-postgres-secret
+  namespace: redhat-ods-applications
+stringData:
+  # Connection string with sslmode=disable for internal PostgreSQL
+  uri: "postgresql+psycopg2://feast:feast@postgres.feast-trainer-demo.svc.cluster.local:5432/mlflow?sslmode=disable"
+---
+# OAuth Proxy for browser-based UI access
+# The MLflow operator uses kubernetes-auth which requires token-based access
+# OAuth proxy handles OpenShift authentication and forwards tokens to MLflow
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlflow-oauth-proxy
+  namespace: redhat-ods-applications
+  annotations:
+    serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"mlflow-ui"}}'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlflow-oauth-proxy-review
+subjects:
+- kind: ServiceAccount
+  name: mlflow-oauth-proxy
+  namespace: redhat-ods-applications
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-oauth-proxy-secret
+  namespace: redhat-ods-applications
+  annotations:
+    kubernetes.io/description: "Session secret for OAuth proxy - regenerate with: openssl rand -hex 16"
+stringData:
+  # 32-character hex string (16 bytes) for AES encryption
+  # Generate with: openssl rand -hex 16
+  session_secret: "<GENERATE_WITH_openssl_rand_-hex_16>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-oauth-proxy
+  namespace: redhat-ods-applications
+  labels:
+    app.kubernetes.io/name: mlflow-oauth-proxy
+    app.kubernetes.io/component: authentication
+    app.kubernetes.io/part-of: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow-oauth-proxy
+  template:
+    metadata:
+      labels:
+        app: mlflow-oauth-proxy
+    spec:
+      serviceAccountName: mlflow-oauth-proxy
+      containers:
+      - name: oauth-proxy
+        image: registry.redhat.io/openshift4/ose-oauth-proxy:v4.14
+        args:
+        - --https-address=:8443
+        - --provider=openshift
+        - --openshift-service-account=mlflow-oauth-proxy
+        - --upstream=https://mlflow.redhat-ods-applications.svc.cluster.local:8443
+        - --upstream-ca=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        - --tls-cert=/etc/tls/private/tls.crt
+        - --tls-key=/etc/tls/private/tls.key
+        - --cookie-secret-file=/etc/proxy/secrets/session_secret
+        - --cookie-secure=true
+        - --openshift-delegate-urls={"/":{"resource":"pods","namespace":"redhat-ods-applications","verb":"get"}}
+        - --pass-user-bearer-token=true
+        - --pass-access-token=true
+        ports:
+        - containerPort: 8443
+          name: https
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: proxy-tls
+          mountPath: /etc/tls/private
+          readOnly: true
+        - name: proxy-secret
+          mountPath: /etc/proxy/secrets
+          readOnly: true
+      volumes:
+      - name: proxy-tls
+        secret:
+          secretName: mlflow-oauth-proxy-tls
+      - name: proxy-secret
+        secret:
+          secretName: mlflow-oauth-proxy-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-oauth-proxy
+  namespace: redhat-ods-applications
+  labels:
+    app.kubernetes.io/name: mlflow-oauth-proxy
+  annotations:
+    # Auto-generate TLS certificate for the service
+    service.beta.openshift.io/serving-cert-secret-name: mlflow-oauth-proxy-tls
+spec:
+  selector:
+    app: mlflow-oauth-proxy
+  ports:
+  - name: https
+    port: 8443
+    targetPort: 8443
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mlflow-ui
+  namespace: redhat-ods-applications
+  labels:
+    app.kubernetes.io/name: mlflow-ui
+spec:
+  to:
+    kind: Service
+    name: mlflow-oauth-proxy
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt

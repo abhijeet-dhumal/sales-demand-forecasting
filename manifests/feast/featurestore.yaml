@@ -1,0 +1,116 @@
+# Feast FeatureStore CR
+#
+# Architecture: PostgreSQL Registry + Ray Offline + Redis Online
+#
+# Prerequisites:
+#   - databases/postgres.yaml deployed
+#   - databases/redis.yaml deployed
+#   - ray/raycluster.yaml deployed
+#   - Custom image: quay.io/abdhumal/feast-ray-server:latest
+#
+---
+apiVersion: feast.dev/v1
+kind: FeatureStore
+metadata:
+  name: salesforecasting
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: feast
+    app.kubernetes.io/component: feature-store
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+    feature-store-ui: enabled
+spec:
+  feastProject: sales_forecasting
+  
+  # Feature repository from Git
+  feastProjectDir:
+    git:
+      url: https://github.com/abhijeet-dhumal/sales-demand-forecasting.git
+      ref: main
+      featureRepoPath: feature_repo
+  
+  services:
+    # Shared volumes for writable paths
+    volumes:
+    - name: ui-build-dir
+      emptyDir: {}
+    
+    # ===========================================
+    # Offline Store: Ray (Distributed Compute)
+    # ===========================================
+    offlineStore:
+      persistence:
+        store:
+          type: ray
+          secretRef:
+            name: feast-data-stores
+      server:
+        image: quay.io/abdhumal/feast-ray-server:latest
+    
+    # ===========================================
+    # Online Store: Redis (Low-Latency Serving)
+    # ===========================================
+    onlineStore:
+      persistence:
+        store:
+          type: redis
+          secretRef:
+            name: feast-data-stores
+      server:
+        image: quay.io/abdhumal/feast-ray-server:latest
+        envFrom:
+        - secretRef:
+            name: postgres-secret
+        env:
+        - name: MPLCONFIGDIR
+          value: /tmp
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+    
+    # ===========================================
+    # Registry: PostgreSQL (Durable Metadata)
+    # ===========================================
+    registry:
+      local:
+        persistence:
+          store:
+            type: sql
+            secretRef:
+              name: feast-data-stores
+        server:
+          image: quay.io/abdhumal/feast-ray-server:latest
+          envFrom:
+          - secretRef:
+              name: postgres-secret
+          env:
+          - name: MPLCONFIGDIR
+            value: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          restAPI: true
+    
+    # ===========================================
+    # UI: Feast Web Interface
+    # ===========================================
+    ui:
+      image: quay.io/abdhumal/feast-ray-server:latest
+      envFrom:
+      - secretRef:
+          name: postgres-secret
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      volumeMounts:
+      - name: ui-build-dir
+        mountPath: /usr/local/lib/python3.11/site-packages/feast/ui/build

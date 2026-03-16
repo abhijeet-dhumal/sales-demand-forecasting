@@ -1,0 +1,47 @@
+# Centralized Configuration
+#
+# Single source of truth for shared configuration values.
+# Reference in Deployments/Jobs using envFrom or env valueFrom.
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlops-config
+  namespace: feast-trainer-demo
+  labels:
+    app.kubernetes.io/name: mlops-config
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+data:
+  # === Database ===
+  POSTGRES_HOST: "postgres.feast-trainer-demo.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DATABASE: "feast"
+  
+  # === MLflow ===
+  MLFLOW_TRACKING_URI: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+  MLFLOW_EXPERIMENT_NAME: "sales-forecasting"
+  
+  # === Ray Cluster ===
+  RAY_CLUSTER_NAME: "feast-ray"
+  RAY_NAMESPACE: "feast-trainer-demo"
+  RAY_ADDRESS: "ray://feast-ray-head-svc.feast-trainer-demo.svc.cluster.local:10001"
+  
+  # === Feast ===
+  FEAST_REGISTRY_TYPE: "sql"
+  FEAST_ONLINE_STORE_TYPE: "redis"
+  FEAST_OFFLINE_STORE_TYPE: "ray"
+  FEATURE_REPO_PATH: "/shared/feature_repo"
+  
+  # === Model Registry (RHOAI) ===
+  MODEL_REGISTRY_URL: "https://model-catalog.rhoai-model-registries.svc.cluster.local:8443"
+  REGISTERED_MODEL_NAME: "sales-forecast"
+  
+  # === Storage ===
+  DATA_PATH: "/shared/data"
+  OUTPUT_DIR: "/shared/models"
+  
+  # === Training Defaults ===
+  NUM_EPOCHS: "20"
+  BATCH_SIZE: "512"
+  LEARNING_RATE: "0.001"
