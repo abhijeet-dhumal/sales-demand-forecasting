@@ -217,3 +217,9 @@ manifests/feast/feast-secrets.yaml
 *-secrets.yaml
 !*-secret.example.yaml
 !*-secrets.example.yaml
+
+# Diagram source files (only PNG outputs are committed)
+docs/diagrams/*.drawio
+docs/diagrams/*.mmd
+docs/diagrams/generate-diagrams.sh
+docs/diagrams/diagrams.html

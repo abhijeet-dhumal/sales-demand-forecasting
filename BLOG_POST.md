@@ -137,9 +137,54 @@ On OpenShift AI, the **Feast Operator** automates feature store infrastructure:
 | **Redis Online Store** | Low-latency feature serving |
 | **Ray Offline Store** | Distributed historical feature retrieval |
 | **gRPC Services** | Secure communication between components |
-| **Client ConfigMaps** | Auto-generated configuration for workbenches |
+| **Client ConfigMaps** | Auto-generated configuration (auto-mounted in workbenches, manually mounted in jobs) |
 
 When you create a FeatureStore custom resource, the operator provisions all components and generates client configuration that workbenches can mount automatically.
+
+**FeatureStore Custom Resource:**
+
+```yaml
+apiVersion: feast.dev/v1
+kind: FeatureStore
+metadata:
+  name: salesforecasting
+  namespace: feast-trainer-demo
+spec:
+  feastProject: sales_forecasting
+  
+  # Feature definitions from Git repository
+  feastProjectDir:
+    git:
+      url: https://github.com/your-org/sales-demand-forecasting.git
+      ref: main
+      featureRepoPath: feature_repo
+  
+  services:
+    # Offline Store: Ray for distributed historical queries
+    offlineStore:
+      persistence:
+        store:
+          type: ray
+          secretRef:
+            name: feast-data-stores
+    
+    # Online Store: Redis for low-latency serving
+    onlineStore:
+      persistence:
+        store:
+          type: redis
+          secretRef:
+            name: feast-data-stores
+    
+    # Registry: PostgreSQL for durable metadata
+    registry:
+      local:
+        persistence:
+          store:
+            type: sql
+            secretRef:
+              name: feast-data-stores
+```
 
 ![Feature Store Overview](docs/images/FeatureStoreOverview.png)
 *Feast UI showing feature lineage from data sources → entities → feature views → feature services.*
@@ -155,6 +200,38 @@ The critical insight is creating **two FeatureServices** that share the same fea
 |---------|---------|-----------------------------------|
 | `training_features` | Historical feature retrieval for model training | **Yes** - model learns to predict this |
 | `inference_features` | Real-time feature lookup for predictions | **No** - this is what we're predicting |
+
+```python
+# Training FeatureService - includes target column
+training_features = FeatureService(
+    name="training_features",
+    features=[
+        sales_features[[
+            "weekly_sales",  # Target - only in training
+            "lag_1", "lag_2", "lag_4", "lag_8",
+            "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+            "week_of_year", "month", "quarter", "is_holiday",
+            "temperature", "fuel_price", "cpi", "unemployment",
+        ]],
+        store_features[["store_type", "store_size", "region"]],
+    ],
+)
+
+# Inference FeatureService - excludes target column
+inference_features = FeatureService(
+    name="inference_features",
+    features=[
+        sales_features[[
+            # No weekly_sales - that's what we predict!
+            "lag_1", "lag_2", "lag_4", "lag_8",
+            "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
+            "week_of_year", "month", "quarter", "is_holiday",
+            "temperature", "fuel_price", "cpi", "unemployment",
+        ]],
+        store_features[["store_type", "store_size", "region"]],
+    ],
+)
+```
 
 **Features included in both services:**
 
@@ -199,6 +276,26 @@ The **Kubeflow Trainer** handles all of this declaratively, supporting:
 | **Multi-accelerator support** | NVIDIA (CUDA/NCCL) and AMD (ROCm/RCCL) |
 | **Automatic coordination** | Environment variables and service discovery handled automatically |
 
+**PyTorch DDP Initialization (handled automatically by Kubeflow):**
+
+```python
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+# Kubeflow sets MASTER_ADDR, WORLD_SIZE, RANK automatically
+dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+rank, world_size = dist.get_rank(), dist.get_world_size()
+
+# Each rank gets its own GPU
+device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', 0)}")
+model = MLP(input_dim).to(device)
+model = DDP(model)  # Wrap for distributed training
+
+# DistributedSampler ensures each rank processes different data
+sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler)
+```
+
 ### Training Pattern
 
 The training workflow follows a proven pattern:
@@ -210,6 +307,32 @@ The training workflow follows a proven pattern:
 | 3 | PyTorch DDP | Distribute training across nodes |
 | 4 | MLflow | Track experiments, log model |
 | 5 | Shared Storage | Save artifacts for serving |
+
+**Fetching Historical Features with Feast SDK:**
+
+```python
+from feast import FeatureStore
+from datetime import datetime, timezone, timedelta
+
+# Initialize Feast with operator-provided config
+store = FeatureStore(repo_path="/opt/app-root/src/feast-config/salesforecasting")
+
+# Build entity DataFrame (store_id, dept_id, timestamp)
+entity_df = pd.DataFrame([
+    {"store_id": s, "dept_id": d, "event_timestamp": datetime(2022, 1, 1, tzinfo=timezone.utc) + timedelta(weeks=w)}
+    for w in range(104) for s in range(1, 46) for d in range(1, 15)
+])
+
+# Retrieve historical features via Feast gRPC (Ray distributes the query)
+df = store.get_historical_features(
+    entity_df=entity_df,
+    features=store.get_feature_service("training_features")
+).to_df()
+
+# df now contains all features + weekly_sales target
+X = df[feature_columns].values
+y = df["weekly_sales"].values
+```
 
 ### MLflow Integration
 
@@ -240,6 +363,80 @@ The same training configuration scales from development to production:
 | **Team** | 2-4 nodes, GPU | Regular training runs |
 | **Production** | 8-64 nodes | Large models, hyperparameter sweeps |
 
+**Submitting a TrainJob with Kubeflow SDK:**
+
+```python
+from kubeflow.trainer import TrainerClient, CustomTrainer
+
+trainer = TrainerClient()
+
+# Submit distributed training job
+trainer.train(
+    trainer=CustomTrainer(
+        func=train_fn,                    # Your training function
+        num_nodes=4,                      # Scale to 4 nodes
+        resources_per_node={
+            "gpu": 1,                     # 1 GPU per node
+            "cpu": 4,
+            "memory": "16Gi"
+        },
+        packages_to_install=["feast", "mlflow", "torch"],
+    ),
+    namespace="feast-trainer-demo",
+    env={
+        "FEAST_CONFIG_PATH": "/opt/app-root/src/feast-config/salesforecasting",
+        "MLFLOW_TRACKING_URI": "https://mlflow.apps.cluster.local",
+    },
+)
+```
+
+**TrainJob YAML (declarative alternative):**
+
+```yaml
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: sales-training
+  namespace: feast-trainer-demo
+spec:
+  runtimeRef:
+    name: torch-distributed
+    kind: ClusterTrainingRuntime
+  trainer:
+    image: quay.io/modh/training:py312-cuda128-torch280
+    numNodes: 2
+    numProcPerNode: 1
+    resourcesPerNode:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+    env:
+    - name: FEAST_CONFIG_PATH
+      value: /opt/app-root/src/feast-config/salesforecasting
+    - name: MLFLOW_TRACKING_URI
+      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+    - name: NUM_EPOCHS
+      value: "50"
+  podTemplateOverrides:
+  - targetJobs:
+    - name: node
+    spec:
+      volumes:
+      - name: feast-config
+        configMap:
+          name: feast-salesforecasting-client  # Created by Feast Operator
+      containers:
+      - name: node
+        volumeMounts:
+        - name: feast-config
+          mountPath: /opt/app-root/src/feast-config/salesforecasting
+```
+
+> **Note**: The `feast-salesforecasting-client` ConfigMap is created by the Feast Operator when you deploy the FeatureStore CR. In **workbenches**, this is auto-mounted when you connect to the feature store via the OpenShift AI UI. For **TrainJobs and InferenceServices**, you must explicitly mount it as shown above.
+
 ---
 
 ## Phase 3: Model Serving with KServe
@@ -259,6 +456,36 @@ The key innovation is **Feast SDK integration** in the serving layer:
 | 4 | Model | Scales features, runs inference |
 | 5 | KServe | Returns prediction |
 
+**Fetching Online Features in KServe Model:**
+
+```python
+from feast import FeatureStore
+from kserve import Model
+
+class SalesForecastModel(Model):
+    def load(self):
+        # Same Feast SDK, same config path as training
+        self.feast_store = FeatureStore(repo_path="/opt/app-root/src/feast-config/salesforecasting")
+        self.model = torch.load("best_model.pt")
+    
+    def preprocess(self, payload):
+        # Client sends only entity IDs
+        entities = payload["inputs"][0]["data"]  # [{"store_id": 1, "dept_id": 5}, ...]
+        
+        # Fetch features from Redis online store via Feast SDK
+        features = self.feast_store.get_online_features(
+            entity_rows=entities,
+            features=self.feast_store.get_feature_service("inference_features")
+        ).to_dict()
+        
+        return self._build_feature_matrix(features)
+    
+    def predict(self, X):
+        X_scaled = self.scaler.transform(X)
+        with torch.no_grad():
+            return self.model(torch.FloatTensor(X_scaled)).numpy()
+```
+
 ### Why This Matters
 
 | Approach | Client Sends | Pros | Cons |
@@ -267,6 +494,46 @@ The key innovation is **Feast SDK integration** in the serving layer:
 | **With Feast** | Entity IDs only | No drift, simple client | Requires online store |
 
 By fetching features at serving time using the **same Feast SDK** as training, we guarantee identical feature computation.
+
+**InferenceService YAML:**
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sales-forecast
+  namespace: feast-trainer-demo
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 3
+    containers:
+    - name: kserve-container
+      image: quay.io/modh/training:py312-cuda128-torch280
+      env:
+      - name: MODEL_DIR
+        value: /shared/models
+      - name: FEAST_CONFIG_PATH
+        value: /opt/app-root/src/feast-config/salesforecasting
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "2Gi"
+      volumeMounts:
+      - name: model-storage
+        mountPath: /shared
+      - name: feast-config
+        mountPath: /opt/app-root/src/feast-config/salesforecasting
+    volumes:
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: shared
+    - name: feast-config
+      configMap:
+        name: feast-salesforecasting-client  # Created by Feast Operator
+```
 
 ### Latency Components
 
