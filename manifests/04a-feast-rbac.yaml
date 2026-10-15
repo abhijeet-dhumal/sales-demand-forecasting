@@ -46,3 +46,35 @@ roleRef:
   kind: Role
   name: feast-rayjob-role
   apiGroup: rbac.authorization.k8s.io
+---
+# The operator-managed FeatureStore initializes the Ray batch engine from its
+# own service account. CodeFlare first reads the RayCluster and then discovers
+# the KubeRay CA Secret by label. Kubernetes RBAC cannot restrict a Secret list
+# operation to a label selector, so list is namespace-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: feast-kuberay-client
+  namespace: {{DEMO_NAMESPACE}}
+rules:
+- apiGroups: ["ray.io"]
+  resources: ["rayclusters"]
+  resourceNames: ["{{RAY_CLUSTER_NAME}}"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: feast-kuberay-client
+  namespace: {{DEMO_NAMESPACE}}
+subjects:
+- kind: ServiceAccount
+  name: {{FEAST_OPERATOR_SERVICE_ACCOUNT}}
+  namespace: {{DEMO_NAMESPACE}}
+roleRef:
+  kind: Role
+  name: feast-kuberay-client
+  apiGroup: rbac.authorization.k8s.io

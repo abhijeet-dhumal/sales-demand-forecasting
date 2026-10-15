@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feast-ray-batch-engine
+  namespace: sales-demand-forecasting
+  labels:
+    app.kubernetes.io/name: sales-demand-forecasting
+    app.kubernetes.io/component: feast-batch-engine
+    app.kubernetes.io/part-of: sales-demand-forecasting-demo
+data:
+  config.yaml: |
+    type: ray.engine
+    max_workers: 2
+    enable_optimization: true
+    broadcast_join_threshold_mb: 100
+    max_parallelism_multiplier: 1
+    target_partition_size_mb: 16
+    enable_ray_logging: true
+    use_kuberay: true
+    kuberay_conf:
+      cluster_name: feast-ray
+      namespace: sales-demand-forecasting
+      skip_tls: false
