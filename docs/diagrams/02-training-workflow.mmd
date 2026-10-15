@@ -1,0 +1,19 @@
+flowchart LR
+    WB["Workbench<br/>TrainerClient"]
+    TR["Kubeflow Trainer<br/>CPU-first TrainJob"]
+    FEAST["Feast FeatureService<br/>point-in-time retrieval"]
+    RAY["KubeRay<br/>Ray offline plugin<br/>runtime compatibility pending"]
+    PVC[("Shared PVC<br/>unique model run directory")]
+    BT["Rolling-origin evaluation<br/>baselines + pooled tree"]
+    MLP["MLP integration model<br/>not selected or promoted"]
+    MLFLOW["RHOAI-managed MLflow<br/>Workbench identity"]
+
+    WB -->|submit + monitor| TR
+    TR --> FEAST --> RAY --> FEAST --> TR
+    TR --> BT --> MLP
+    TR -->|model + JSON metrics| PVC
+    TR -->|exit status| WB
+    WB -->|after success: log artifacts + metrics| MLFLOW
+
+    note1["The Workbench OAuth token is not passed to the Trainer pod."]
+    WB -.-> note1

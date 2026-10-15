@@ -1,0 +1,138 @@
+# Demo object storage. MinIO data is on a dedicated RWO block volume; the RWX
+# shared claim remains the common filesystem for Workbench, Ray, and Trainer.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{MINIO_DATA_PVC_NAME}}
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: {{MINIO_STORAGE_CLASS}}
+  resources:
+    requests:
+      storage: {{MINIO_PVC_SIZE}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{MINIO_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{MINIO_SERVICE}}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{MINIO_SERVICE}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: {{MINIO_FS_GROUP}}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: minio
+        image: {{MINIO_IMAGE}}
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - /data
+        - --address
+        - :9000
+        - --console-address
+        - :9001
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-user
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-password
+        - name: MINIO_BROWSER_REDIRECT_URL
+          value: {{MINIO_CONSOLE_URL}}
+        ports:
+        - name: s3
+          containerPort: 9000
+          protocol: TCP
+        - name: console
+          containerPort: 9001
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: s3
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: s3
+          initialDelaySeconds: 30
+          periodSeconds: 20
+        volumeMounts:
+        - name: minio-data
+          mountPath: /data
+      volumes:
+      - name: minio-data
+        persistentVolumeClaim:
+          claimName: {{MINIO_DATA_PVC_NAME}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{MINIO_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  selector:
+    app.kubernetes.io/name: {{MINIO_SERVICE}}
+  ports:
+  - name: s3
+    port: 9000
+    targetPort: s3
+  - name: console
+    port: 9001
+    targetPort: console
+---
+# Expose only the authenticated Console. S3 API access stays cluster-internal.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: minio-console
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  host: {{MINIO_CONSOLE_HOST}}
+  to:
+    kind: Service
+    name: {{MINIO_SERVICE}}
+    weight: 100
+  port:
+    targetPort: console
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

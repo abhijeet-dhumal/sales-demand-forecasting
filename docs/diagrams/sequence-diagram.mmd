@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    actor DS as Data Scientist
+    participant WB as OpenShift AI Workbench
+    participant PVC as Shared PVC
+    participant PG as PostgreSQL
+    participant Feast as Feast Server
+    participant Ray as KubeRay
+    participant Trainer as Kubeflow Trainer
+    participant MLflow as RHOAI MLflow
+    participant KServe as KServe
+
+    rect rgb(227, 242, 253)
+        Note over DS,PG: Notebook 01 — real Walmart competition data
+        DS->>WB: Upload train/test/features/stores CSV files
+        WB->>WB: Validate, join, create prior-only features with pandas
+        WB->>PVC: Write Parquet sources
+        WB->>Feast: feast apply + materialize
+        Feast->>PG: Registry + online feature writes
+    end
+
+    rect rgb(255, 243, 224)
+        Note over DS,MLflow: Notebook 02 — training and evaluation
+        DS->>WB: Run rolling-origin evaluation and submit TrainJob
+        WB->>Trainer: Submit unique TrainJob name
+        Trainer->>Feast: get_historical_features(training_features)
+        Feast->>Ray: Point-in-time joins (optional plugin path)
+        Ray-->>Feast: Historical rows
+        Feast-->>Trainer: Bounded result for rank-0 pandas preparation
+        Trainer->>PVC: Save model, metrics, report in unique run directory
+        Trainer-->>WB: Complete
+        WB->>MLflow: Log metrics/artifacts with Workbench integration
+        Note over WB,Trainer: Workbench OAuth token is not forwarded to the Trainer pod
+    end
+
+    rect rgb(232, 245, 233)
+        Note over DS,KServe: Notebook 03 — internal inference
+        DS->>WB: Deploy candidate from latest_candidate.json
+        WB->>KServe: Create InferenceService
+        KServe->>PVC: Load model and scalers
+        DS->>KServe: V2 request with Store/Dept and forecast origin
+        KServe->>Feast: get_online_features()
+        Feast->>PG: Read online feature vector
+        PG-->>Feast: Prior-only features
+        Feast-->>KServe: Feature vector
+        KServe-->>DS: Forecast for target week
+    end

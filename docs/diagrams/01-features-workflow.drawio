@@ -1,0 +1,143 @@
+<mxfile host="app.diagrams.net" modified="2024-03-16T23:55:00.000Z" agent="diagram-generator" version="21.0.0">
+  <diagram name="Feature Engineering Workflow" id="features-workflow">
+    <mxGraphModel dx="1560" dy="620" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1560" pageHeight="620" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Title -->
+        <mxCell id="title" value="Feature Engineering Pipeline" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="70" y="30" width="350" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Raw retail data → ML-ready features via Feast" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="60" width="350" height="25" as="geometry" />
+        </mxCell>
+        
+        <!-- Row 1: Main Flow -->
+        
+        <mxCell id="raw" value="&lt;b&gt;Raw Data&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;4 CSV files&lt;br&gt;65,535 rows&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="70" y="120" width="130" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="engineer" value="&lt;b&gt;Feature Engineering&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Lag (1,2,4,8 weeks)&lt;br&gt;Rolling mean/std&lt;br&gt;Temporal + Holiday&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="280" y="110" width="170" height="100" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="parquet" value="&lt;b&gt;Save Parquet&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;20 features&lt;br&gt;+ entities&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="530" y="120" width="130" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="apply" value="&lt;b&gt;FeatureStore.apply()&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Register entities&lt;br&gt;FeatureViews&lt;br&gt;FeatureServices&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="740" y="110" width="140" height="100" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="materialize" value="&lt;b&gt;FeatureStore.materialize()&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Push latest values&lt;br&gt;to online store&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="960" y="120" width="150" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="done" value="&lt;b&gt;Ready&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Train &amp;amp;&lt;br&gt;Inference&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="120" width="90" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Row 2: Storage -->
+        
+        <mxCell id="pvc" value="&lt;b&gt;Shared PVC&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Parquet files&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="545" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="postgres" value="&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#ccc&quot;&gt;Registry&lt;br&gt;(metadata)&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#336791;strokeColor=#234567;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="760" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="redis" value="&lt;b&gt;Redis&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#fcc&quot;&gt;Online Store&lt;br&gt;~5ms latency&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#DC382D;strokeColor=#9e2a22;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="985" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="ray" value="&lt;b&gt;Ray&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#cef&quot;&gt;Offline Store&lt;br&gt;(distributed)&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#028CF0;strokeColor=#0066b3;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Main Flow Arrows with labels -->
+        <mxCell id="a1" value="pandas" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="200" y="160" as="sourcePoint" />
+            <mxPoint x="280" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a2" value="to_parquet" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="450" y="160" as="sourcePoint" />
+            <mxPoint x="530" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a3" value="features.py" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="660" y="160" as="sourcePoint" />
+            <mxPoint x="740" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a4" value="" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="880" y="160" as="sourcePoint" />
+            <mxPoint x="960" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a5" value="" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1110" y="160" as="sourcePoint" />
+            <mxPoint x="1190" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Storage Arrows with labels -->
+        <mxCell id="a6" value="write" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="595" y="200" as="sourcePoint" />
+            <mxPoint x="595" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a7" value="metadata" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="810" y="210" as="sourcePoint" />
+            <mxPoint x="810" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a8" value="push" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="1035" y="200" as="sourcePoint" />
+            <mxPoint x="1035" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a9" value="query" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="1230" y="200" as="sourcePoint" />
+            <mxPoint x="1230" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Bottom summary -->
+        <mxCell id="summary_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#e2e8f0;" vertex="1" parent="1">
+          <mxGeometry x="70" y="420" width="1210" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="summary" value="&lt;b&gt;Key:&lt;/b&gt; Same FeatureService definitions used in training &amp; inference → &lt;b&gt;Zero training-serving skew&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="425" width="1210" height="40" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

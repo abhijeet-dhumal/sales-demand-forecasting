@@ -1,0 +1,76 @@
+# Apply after the dataset ZIP exists in the bucket. Also copies the importer
+# provenance manifest when present; manual Console uploads need only the ZIP.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-dataset-sync
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: {{MINIO_FS_GROUP}}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: sync-dataset
+        image: {{MINIO_SYNC_IMAGE}}
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -eu
+          data_dir=/shared/walmart-competition-data
+          mkdir -p "$data_dir"
+          aws --endpoint-url "$S3_ENDPOINT" --no-cli-pager --only-show-errors \
+            s3 cp "s3://$MINIO_BUCKET/$MINIO_OBJECT_KEY" "$data_dir/walmart-sales-forecast.zip"
+          test -s "$data_dir/walmart-sales-forecast.zip"
+          if aws --endpoint-url "$S3_ENDPOINT" --no-cli-pager \
+            s3api head-object --bucket "$MINIO_BUCKET" --key "$MINIO_MANIFEST_OBJECT_KEY" >/dev/null 2>&1; then
+            aws --endpoint-url "$S3_ENDPOINT" --no-cli-pager --only-show-errors \
+              s3 cp "s3://$MINIO_BUCKET/$MINIO_MANIFEST_OBJECT_KEY" \
+              "$data_dir/walmart-sales-forecast.zip.manifest.json"
+          fi
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-user
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-password
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        - name: S3_ENDPOINT
+          value: http://{{MINIO_SERVICE}}.{{DEMO_NAMESPACE}}.svc.cluster.local:9000
+        - name: MINIO_BUCKET
+          value: {{MINIO_BUCKET}}
+        - name: MINIO_OBJECT_KEY
+          value: {{MINIO_OBJECT_KEY}}
+        - name: MINIO_MANIFEST_OBJECT_KEY
+          value: {{MINIO_MANIFEST_OBJECT_KEY}}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /shared
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: {{SHARED_PVC_NAME}}

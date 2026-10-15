@@ -1,0 +1,16 @@
+flowchart LR
+    A["Kaggle Walmart files<br/>train, test, features, stores"]
+    B["Notebook 01<br/>pandas validation +<br/>leakage-safe feature rows"]
+    C[("Shared PVC<br/>Parquet sources")]
+    D["Feast CLI<br/>apply + materialize"]
+    E[("PostgreSQL<br/>registry + online store")]
+    F["Notebook 02<br/>historical retrieval"]
+    R["KubeRay<br/>Feast Ray plugin<br/>compatibility pending"]
+
+    A --> B --> C --> D --> E
+    C --> F
+    F -->|bounded point-in-time joins| R
+    R --> F
+
+    note1["Notebook 01 preprocessing is pandas.<br/>Feast does not automatically run it on Ray."]
+    B -.-> note1

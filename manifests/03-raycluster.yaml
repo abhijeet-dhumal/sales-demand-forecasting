@@ -3,127 +3,107 @@
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
-  name: feast-ray
-  namespace: feast-trainer-demo
+  name: {{RAY_CLUSTER_NAME}}
+  namespace: {{DEMO_NAMESPACE}}
   labels:
-    app: feast-ray
-    ray.io/cluster: feast-ray
+    app: {{RAY_CLUSTER_NAME}}
+    ray.io/cluster: {{RAY_CLUSTER_NAME}}
 spec:
-  rayVersion: '2.52.1'
+  rayVersion: '{{RAY_VERSION}}'
   enableInTreeAutoscaling: false
   
   headGroupSpec:
-    serviceType: ClusterIP
+    serviceType: {{RAY_DASHBOARD_SERVICE_TYPE}}
     rayStartParams:
       dashboard-host: '0.0.0.0'
-      num-cpus: '4'
-      num-gpus: '1'
+      num-cpus: '{{RAY_HEAD_CPUS}}'
       block: 'true'
-      ray-client-server-port: '10001'
-      object-store-memory: '4000000000'
+      ray-client-server-port: '{{RAY_CLIENT_PORT}}'
+      object-store-memory: '{{RAY_OBJECT_STORE_MEMORY}}'
     template:
       metadata:
         labels:
-          app: feast-ray
+          app: {{RAY_CLUSTER_NAME}}
           component: head
-          ray.io/cluster: feast-ray
+          ray.io/cluster: {{RAY_CLUSTER_NAME}}
       spec:
         containers:
         - name: ray-head
-          image: quay.io/modh/ray:2.52.1-py312-cu128
+          image: {{RAY_IMAGE}}
           ports:
-          - containerPort: 6379
+          - containerPort: {{RAY_GCS_PORT}}
             name: gcs
-          - containerPort: 8265
+          - containerPort: {{RAY_DASHBOARD_PORT}}
             name: dashboard
-          - containerPort: 10001
+          - containerPort: {{RAY_CLIENT_PORT}}
             name: client
           resources:
             requests:
-              cpu: "4"
-              memory: "16Gi"
-              nvidia.com/gpu: "1"
+              cpu: "{{RAY_HEAD_CPU_REQUEST}}"
+              memory: "{{RAY_HEAD_MEMORY_REQUEST}}"
             limits:
-              cpu: "8"
-              memory: "24Gi"
-              nvidia.com/gpu: "1"
+              cpu: "{{RAY_HEAD_CPU_LIMIT}}"
+              memory: "{{RAY_HEAD_MEMORY_LIMIT}}"
           env:
           - name: FEAST_DATA_ROOT
-            value: "/shared/data"
+            value: "{{DATA_DIR}}"
           volumeMounts:
           # Mount at /shared (native path)
           - name: shared-storage
-            mountPath: /shared
+            mountPath: {{POD_SHARED_ROOT}}
           # Mount at workbench path (avoids symlink hack)
           - name: shared-storage
-            mountPath: /opt/app-root/src/shared
+            mountPath: {{WORKBENCH_SHARED_ROOT}}
           - name: dshm
             mountPath: /dev/shm
         volumes:
         - name: shared-storage
           persistentVolumeClaim:
-            claimName: shared
+            claimName: {{SHARED_PVC_NAME}}
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
+            sizeLimit: {{RAY_SHARED_MEMORY_LIMIT}}
   
   workerGroupSpecs:
-  - replicas: 1
-    minReplicas: 1
-    maxReplicas: 2
+  - replicas: {{RAY_WORKER_REPLICAS}}
+    minReplicas: {{RAY_WORKER_MIN_REPLICAS}}
+    maxReplicas: {{RAY_WORKER_MAX_REPLICAS}}
     groupName: workers
     rayStartParams:
-      num-cpus: '4'
-      num-gpus: '1'
+      num-cpus: '{{RAY_WORKER_CPUS}}'
       block: 'true'
-      object-store-memory: '4000000000'
+      object-store-memory: '{{RAY_OBJECT_STORE_MEMORY}}'
     template:
       metadata:
         labels:
-          app: feast-ray
+          app: {{RAY_CLUSTER_NAME}}
           component: worker
-          ray.io/cluster: feast-ray
+          ray.io/cluster: {{RAY_CLUSTER_NAME}}
       spec:
         containers:
         - name: ray-worker
-          image: quay.io/modh/ray:2.52.1-py312-cu128
+          image: {{RAY_IMAGE}}
           resources:
             requests:
-              cpu: "4"
-              memory: "16Gi"
-              nvidia.com/gpu: "1"
+              cpu: "{{RAY_WORKER_CPUS}}"
+              memory: "{{RAY_WORKER_MEMORY_REQUEST}}"
             limits:
-              cpu: "8"
-              memory: "24Gi"
-              nvidia.com/gpu: "1"
+              cpu: "{{RAY_WORKER_CPU_LIMIT}}"
+              memory: "{{RAY_WORKER_MEMORY_LIMIT}}"
           volumeMounts:
           - name: shared-storage
-            mountPath: /shared
+            mountPath: {{POD_SHARED_ROOT}}
           - name: shared-storage
-            mountPath: /opt/app-root/src/shared
+            mountPath: {{WORKBENCH_SHARED_ROOT}}
           - name: dshm
             mountPath: /dev/shm
         volumes:
         - name: shared-storage
           persistentVolumeClaim:
-            claimName: shared
+            claimName: {{SHARED_PVC_NAME}}
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
-# Service created automatically by KubeRay operator as "feast-ray-head-svc"
----
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: feast-ray-dashboard
-  namespace: feast-trainer-demo
-spec:
-  to:
-    kind: Service
-    name: feast-ray-head-svc
-  port:
-    targetPort: dashboard
-  tls:
-    termination: edge
+            sizeLimit: {{RAY_SHARED_MEMORY_LIMIT}}
+# Service created automatically by KubeRay operator as "{{RAY_CLUSTER_NAME}}-head-svc"

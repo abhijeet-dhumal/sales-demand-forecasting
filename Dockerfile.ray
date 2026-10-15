@@ -1,0 +1,34 @@
+FROM quay.io/modh/ray@sha256:c713469fd8d8053df549946fbbac2ae92eba4dc17ca1141274243db5ae7db31b
+
+ARG FEAST_CLIENT_VERSION=0.67.0
+ARG CODEFLARE_SDK_VERSION=0.40.1
+ARG PSYCOPG2_BINARY_VERSION=2.9.13
+ARG PROTOBUF_VERSION=6.33.5
+ARG GRPCIO_VERSION=1.76.0
+ARG GRPCIO_HEALTH_CHECKING_VERSION=1.76.0
+ARG GRPCIO_REFLECTION_VERSION=1.76.0
+ARG GRPCIO_TOOLS_VERSION=1.76.0
+ARG UVICORN_VERSION=0.53.0
+ARG KSERVE_VERSION=0.21.0
+ARG JOBLIB_VERSION=1.5.2
+ARG SCIKIT_LEARN_VERSION=1.9.0
+ARG REQUESTS_VERSION=2.32.4
+
+# The base image selects a virtual environment where user-site installs are disabled.
+# Install into that active environment, then restore the base image's non-root runtime user.
+USER 0
+RUN python3 -m pip install --no-cache-dir \
+    "feast[postgres,ray]==${FEAST_CLIENT_VERSION}" \
+    "codeflare-sdk==${CODEFLARE_SDK_VERSION}" \
+    "psycopg2-binary==${PSYCOPG2_BINARY_VERSION}" \
+    "protobuf==${PROTOBUF_VERSION}" \
+    "grpcio==${GRPCIO_VERSION}" \
+    "grpcio-health-checking==${GRPCIO_HEALTH_CHECKING_VERSION}" \
+    "grpcio-reflection==${GRPCIO_REFLECTION_VERSION}" \
+    "grpcio-tools==${GRPCIO_TOOLS_VERSION}" \
+    "uvicorn==${UVICORN_VERSION}" \
+    "kserve==${KSERVE_VERSION}" \
+    "joblib==${JOBLIB_VERSION}" \
+    "scikit-learn==${SCIKIT_LEARN_VERSION}" \
+    "requests==${REQUESTS_VERSION}"
+USER 1001

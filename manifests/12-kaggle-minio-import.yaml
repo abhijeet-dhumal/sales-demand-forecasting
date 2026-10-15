@@ -1,0 +1,106 @@
+# Optional one-time import. Set up Kaggle access in a Secret only if the public
+# dataset requires authentication or consent. The Job is intentionally not part
+# of the default kustomization because it downloads an external dataset.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kaggle-minio-importer
+  namespace: {{DEMO_NAMESPACE}}
+data:
+  download_kaggle_to_minio.py: |
+@@KAGGLE_IMPORT_SCRIPT@@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaggle-minio-import
+  namespace: {{DEMO_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: kaggle-minio-import
+    app.kubernetes.io/component: dataset-ingestion
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kaggle-minio-import
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: import-dataset
+        image: {{KAGGLE_IMPORT_IMAGE}}
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args:
+        - >-
+          python -m pip install --disable-pip-version-check --no-cache-dir
+          --target=/tmp/python-site
+          "kagglehub==${KAGGLEHUB_VERSION}"
+          "boto3==${BOTO3_VERSION}" &&
+          PYTHONPATH=/tmp/python-site exec python /opt/importer/download_kaggle_to_minio.py
+        env:
+        - name: KAGGLE_DATASET_HANDLE
+          value: {{KAGGLE_DATASET_HANDLE}}
+        - name: KAGGLEHUB_CACHE
+          value: /tmp/kagglehub-cache
+        - name: KAGGLE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{KAGGLE_API_TOKEN_SECRET_NAME}}
+              key: KAGGLE_API_TOKEN
+              optional: true
+        - name: KAGGLEHUB_VERSION
+          value: {{KAGGLEHUB_VERSION}}
+        - name: BOTO3_VERSION
+          value: {{BOTO3_VERSION}}
+        - name: MINIO_ENDPOINT
+          value: http://{{MINIO_SERVICE}}.{{DEMO_NAMESPACE}}.svc.cluster.local:9000
+        - name: MINIO_BUCKET
+          value: {{MINIO_BUCKET}}
+        - name: MINIO_OBJECT_KEY
+          value: {{MINIO_OBJECT_KEY}}
+        - name: MINIO_MANIFEST_OBJECT_KEY
+          value: {{MINIO_MANIFEST_OBJECT_KEY}}
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-user
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-password
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: importer-script
+          mountPath: /opt/importer
+          readOnly: true
+      volumes:
+      - name: importer-script
+        configMap:
+          name: kaggle-minio-importer
+          defaultMode: 0444

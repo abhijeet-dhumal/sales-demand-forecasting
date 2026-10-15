@@ -1,0 +1,27 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ray-image-builder
+  labels:
+    app.kubernetes.io/name: ray-image-builder
+    app.kubernetes.io/part-of: sales-forecasting-mlops
+spec:
+  # OpenShift's Docker strategy runs a privileged build pod. Keep the
+  # privileged SCC grant scoped to the namespace builder service account.
+  serviceAccount: builder
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.ray
+  output:
+    to:
+      kind: DockerImage
+      name: quay.io/abdhumal/sales-demand-forecasting-ray:feast-0.67.0-ray-2.58.0-th081-v3-20261015
+    pushSecret:
+      name: quay-push-secret
+  successfulBuildsHistoryLimit: 2
+  failedBuildsHistoryLimit: 2

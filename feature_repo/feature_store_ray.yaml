@@ -1,43 +1,58 @@
 # Ray/KubeRay config for distributed get_historical_features()
 #
 # Used by TrainJob for distributed point-in-time joins.
-# The TrainJob copies this to feature_store.yaml before loading Feast.
+# The Trainer worker copies this into a private temporary config directory
+# before loading Feast; it does not overwrite the shared feature_store.yaml.
 #
 # Prerequisites:
-# - RayCluster "feast-ray" running in same namespace
+# - RayCluster "{{RAY_CLUSTER_NAME}}" running in same namespace
 # - ServiceAccount with RBAC to access RayCluster
 # - CodeFlare SDK auth environment variables set
 
-project: sales_forecasting
+project: {{FEAST_PROJECT}}
 provider: local
 
 registry:
   registry_type: sql
-  path: postgresql+psycopg2://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
-  cache_ttl_seconds: 60
+  path: "${POSTGRES_PY_URL}"
+  cache_ttl_seconds: {{FEAST_REGISTRY_CACHE_TTL_SECONDS}}
 
 # Ray offline store - connects to KubeRay cluster
 offline_store:
   type: ray
-  storage_path: /shared/data/ray_storage
+  storage_path: {{RAY_STORAGE_PATH}}
   use_kuberay: true
   kuberay_conf:
-    cluster_name: feast-ray
-    namespace: feast-trainer-demo
-    skip_tls: true
+    cluster_name: {{RAY_CLUSTER_NAME}}
+    namespace: {{DEMO_NAMESPACE}}
+    skip_tls: false
   broadcast_join_threshold_mb: 100
   enable_distributed_joins: true
   enable_ray_logging: true
 
+# Feast's Ray compute engine executes point-in-time joins and batch transforms.
+batch_engine:
+  type: ray.engine
+  use_kuberay: true
+  kuberay_conf:
+    cluster_name: {{RAY_CLUSTER_NAME}}
+    namespace: {{DEMO_NAMESPACE}}
+    skip_tls: false
+  max_workers: 2
+  max_parallelism_multiplier: 1
+  broadcast_join_threshold_mb: 25
+  target_partition_size_mb: 16
+  enable_ray_logging: true
+
 online_store:
   type: postgres
-  host: postgres.feast-trainer-demo.svc.cluster.local
-  port: 5432
-  database: feast
-  user: feast
-  password: feast123
+  host: {{POSTGRES_HOST}}
+  port: {{POSTGRES_PORT}}
+  database: {{POSTGRES_DATABASE}}
+  user: "{{POSTGRES_USERNAME}}"
+  password: "${POSTGRES_PASSWORD}"
 
-entity_key_serialization_version: 3
+entity_key_serialization_version: {{FEAST_ENTITY_KEY_SERIALIZATION_VERSION}}
 
 
 

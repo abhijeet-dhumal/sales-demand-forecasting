@@ -4,217 +4,216 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: feast-config
-  namespace: feast-trainer-demo
+  name: {{FEAST_CONFIGMAP_NAME}}
+  namespace: {{DEMO_NAMESPACE}}
 data:
   feature_store.yaml: |
-    project: sales_forecasting
+    project: {{FEAST_PROJECT}}
     provider: local
     registry:
       registry_type: sql
-      path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
-      cache_ttl_seconds: 60
+      path: "${POSTGRES_URL}"
+      cache_ttl_seconds: {{FEAST_REGISTRY_CACHE_TTL_SECONDS}}
     offline_store:
       type: file
     online_store:
       type: postgres
-      host: postgres.feast-trainer-demo.svc.cluster.local
-      port: 5432
-      database: feast
-      db_schema: public
-      user: feast
-      password: feast123
-    entity_key_serialization_version: 3
+      host: {{POSTGRES_HOST}}
+      port: {{POSTGRES_PORT}}
+      database: {{POSTGRES_DATABASE}}
+      db_schema: "{{FEAST_DB_SCHEMA}}"
+      user: "{{POSTGRES_USERNAME}}"
+      password: "${POSTGRES_PASSWORD}"
+    entity_key_serialization_version: {{FEAST_ENTITY_KEY_SERIALIZATION_VERSION}}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: feast-server
-  namespace: feast-trainer-demo
+  name: {{FEAST_SERVER_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
   labels:
-    app: feast-server
+    app: {{FEAST_SERVER_SERVICE}}
 spec:
-  replicas: 1
+  replicas: {{FEAST_SERVER_REPLICAS}}
   selector:
     matchLabels:
-      app: feast-server
+      app: {{FEAST_SERVER_SERVICE}}
   template:
     metadata:
       labels:
-        app: feast-server
+        app: {{FEAST_SERVER_SERVICE}}
     spec:
       initContainers:
       # Install dependencies once, share via emptyDir
       - name: install-deps
-        image: quay.io/modh/ray:2.52.1-py312-cu128
+        image: {{FEAST_IMAGE}}
         command:
         - pip
         - install
         - --target=/pylibs
         - -q
-        - feast[postgres]==0.59.0
-        - psycopg2-binary
-        - uvicorn
+        - feast[postgres]=={{FEAST_SERVER_VERSION}}
+        - psycopg2-binary=={{PSYCOPG2_BINARY_VERSION}}
+        - grpcio=={{GRPCIO_VERSION}}
+        - grpcio-health-checking=={{GRPCIO_HEALTH_CHECKING_VERSION}}
+        - uvicorn=={{UVICORN_VERSION}}
         volumeMounts:
         - name: pylibs
           mountPath: /pylibs
       containers:
-      - name: feast-server
-        image: quay.io/modh/ray:2.52.1-py312-cu128
+      - name: {{FEAST_SERVER_SERVICE}}
+        image: {{FEAST_IMAGE}}
         command: ["feast"]
-        args: ["serve", "-h", "0.0.0.0", "-p", "6566", "--no-access-log"]
+        args: ["serve", "-h", "0.0.0.0", "-p", "{{FEAST_SERVER_PORT}}", "--no-access-log"]
         workingDir: /feast
         env:
         - name: PYTHONPATH
           value: /pylibs
         - name: PATH
           value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        - name: POSTGRES_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: url
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
         ports:
-        - containerPort: 6566
+        - containerPort: {{FEAST_SERVER_PORT}}
           name: http
         resources:
           requests:
-            cpu: 250m
-            memory: 512Mi
+            cpu: {{FEAST_SERVER_CPU_REQUEST}}
+            memory: {{FEAST_SERVER_MEMORY_REQUEST}}
           limits:
-            cpu: 1
-            memory: 2Gi
+            cpu: {{FEAST_SERVER_CPU_LIMIT}}
+            memory: {{FEAST_SERVER_MEMORY_LIMIT}}
         volumeMounts:
         - name: pylibs
           mountPath: /pylibs
-        - name: feast-config
+        - name: {{FEAST_CONFIGMAP_NAME}}
           mountPath: /feast
         readinessProbe:
           httpGet:
             path: /health
-            port: 6566
-          initialDelaySeconds: 30
-          periodSeconds: 10
+            port: {{FEAST_SERVER_PORT}}
+          initialDelaySeconds: {{FEAST_READINESS_INITIAL_DELAY_SECONDS}}
+          periodSeconds: {{FEAST_READINESS_PERIOD_SECONDS}}
         livenessProbe:
           httpGet:
             path: /health
-            port: 6566
-          initialDelaySeconds: 60
-          periodSeconds: 30
+            port: {{FEAST_SERVER_PORT}}
+          initialDelaySeconds: {{FEAST_LIVENESS_INITIAL_DELAY_SECONDS}}
+          periodSeconds: {{FEAST_LIVENESS_PERIOD_SECONDS}}
       volumes:
       - name: pylibs
         emptyDir: {}
-      - name: feast-config
+      - name: {{FEAST_CONFIGMAP_NAME}}
         configMap:
-          name: feast-config
+          name: {{FEAST_CONFIGMAP_NAME}}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: feast-server
-  namespace: feast-trainer-demo
+  name: {{FEAST_SERVER_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
 spec:
   selector:
-    app: feast-server
+    app: {{FEAST_SERVER_SERVICE}}
   ports:
   - name: http
-    port: 6566
+    port: {{FEAST_SERVER_PORT}}
 ---
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: feast-server
-  namespace: feast-trainer-demo
-spec:
-  to:
-    kind: Service
-    name: feast-server
-  port:
-    targetPort: http
-  tls:
-    termination: edge
 ---
 # Feast UI - Web dashboard for feature exploration
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: feast-ui
-  namespace: feast-trainer-demo
+  name: {{FEAST_UI_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
   labels:
-    app: feast-ui
+    app: {{FEAST_UI_SERVICE}}
 spec:
-  replicas: 1
+  replicas: {{FEAST_UI_REPLICAS}}
   selector:
     matchLabels:
-      app: feast-ui
+      app: {{FEAST_UI_SERVICE}}
   template:
     metadata:
       labels:
-        app: feast-ui
+        app: {{FEAST_UI_SERVICE}}
     spec:
       initContainers:
       - name: install-deps
-        image: quay.io/modh/ray:2.52.1-py312-cu128
+        image: {{FEAST_IMAGE}}
         command:
         - pip
         - install
         - --target=/pylibs
         - -q
-        - feast[postgres]==0.59.0
-        - psycopg2-binary
+        - feast[postgres]=={{FEAST_SERVER_VERSION}}
+        - psycopg2-binary=={{PSYCOPG2_BINARY_VERSION}}
+        - grpcio=={{GRPCIO_VERSION}}
+        - grpcio-health-checking=={{GRPCIO_HEALTH_CHECKING_VERSION}}
+        - grpcio-reflection=={{GRPCIO_REFLECTION_VERSION}}
         volumeMounts:
         - name: pylibs
           mountPath: /pylibs
       containers:
-      - name: feast-ui
-        image: quay.io/modh/ray:2.52.1-py312-cu128
+      - name: {{FEAST_UI_SERVICE}}
+        image: {{FEAST_IMAGE}}
         command: ["feast"]
-        args: ["ui", "-h", "0.0.0.0", "-p", "8888"]
+        args: ["ui", "-h", "0.0.0.0", "-p", "{{FEAST_UI_PORT}}"]
         workingDir: /feast
         env:
         - name: PYTHONPATH
           value: /pylibs
         - name: PATH
           value: /pylibs/bin:/usr/local/bin:/usr/bin:/bin
+        - name: POSTGRES_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: url
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
         ports:
-        - containerPort: 8888
+        - containerPort: {{FEAST_UI_PORT}}
           name: ui
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
+            cpu: {{FEAST_UI_CPU_REQUEST}}
+            memory: {{FEAST_UI_MEMORY_REQUEST}}
           limits:
-            cpu: 500m
-            memory: 1Gi
+            cpu: {{FEAST_UI_CPU_LIMIT}}
+            memory: {{FEAST_UI_MEMORY_LIMIT}}
         volumeMounts:
         - name: pylibs
           mountPath: /pylibs
-        - name: feast-config
+        - name: {{FEAST_CONFIGMAP_NAME}}
           mountPath: /feast
       volumes:
       - name: pylibs
         emptyDir: {}
-      - name: feast-config
+      - name: {{FEAST_CONFIGMAP_NAME}}
         configMap:
-          name: feast-config
+          name: {{FEAST_CONFIGMAP_NAME}}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: feast-ui
-  namespace: feast-trainer-demo
+  name: {{FEAST_UI_SERVICE}}
+  namespace: {{DEMO_NAMESPACE}}
 spec:
   selector:
-    app: feast-ui
+    app: {{FEAST_UI_SERVICE}}
   ports:
   - name: ui
-    port: 8888
+    port: {{FEAST_UI_PORT}}
 ---
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: feast-ui
-  namespace: feast-trainer-demo
-spec:
-  to:
-    kind: Service
-    name: feast-ui
-  port:
-    targetPort: ui
-  tls:
-    termination: edge

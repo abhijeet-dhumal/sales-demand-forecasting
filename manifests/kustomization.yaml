@@ -1,15 +1,16 @@
 # Sales Forecasting MLOps Pipeline
 #
 # Deploy infrastructure:
-#   kubectl apply -k manifests/
+#   python3 scripts/render_config.py
+#   kubectl apply -k .generated/manifests
 #
 # Then run jobs:
-#   kubectl apply -f manifests/05-dataprep-job.yaml
+#   kubectl apply -f .generated/manifests/05-dataprep-job.yaml
 #
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: feast-trainer-demo
+namespace: {{DEMO_NAMESPACE}}
 
 labels:
 - pairs:
@@ -20,12 +21,19 @@ resources:
 # Infrastructure (apply in order)
 - 00-prereqs.yaml        # Namespace
 - 01-postgres.yaml       # PostgreSQL
-- 02-mlflow.yaml         # MinIO (MLflow CRD applied separately)
+- 02-minio.yaml          # MinIO S3 service, console route, and dedicated RWO data PVC
+# MLflow can be provided by the RHOAI-managed cluster instance;
 - 03-raycluster.yaml     # KubeRay cluster
 - 04a-feast-rbac.yaml    # RBAC for Feast/Ray
+- 04c-workbench-rbac.yaml # Least-privilege access for notebook submissions and serving
+- 04d-workbench-db-secret.yaml # Read only the Feast database Secret from Notebook 01
 - 04b-feast-server.yaml  # Feast server + UI
 
-# Jobs (apply separately after infrastructure is ready):
+# Optional/legacy resources are not part of the supported notebook flow:
 # - 05-dataprep-job.yaml
-# - 06-trainjob.yaml (or submit via notebook)
+# - 06-trainjob.yaml (deprecated; lacks Workbench MLflow auth)
 # - 08-kserve-inference.yaml
+# - 09-ray-image-buildconfig.yaml
+# - 10-minio-bucket-bootstrap.yaml (run once after MinIO is ready)
+# - 11-minio-dataset-sync.yaml (run after uploading the Kaggle ZIP)
+# - 12-kaggle-minio-import.yaml (optional one-time download from Kaggle)

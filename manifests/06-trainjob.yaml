@@ -1,78 +1,128 @@
-# Training Job with Feast + Ray Integration + MLflow
+# DEPRECATED legacy example. Do not apply for the customer-facing notebook flow.
+# RHOAI's managed MLflow authentication is injected into Workbenches; this
+# standalone TrainJob does not have that integration. Notebook 02 submits the
+# Trainer job and logs its PVC artifacts from the authenticated Workbench.
 #
 # NOTE: Runtime pip install is used because Kubeflow TrainJob doesn't support
 # init containers. For production, create a custom image with dependencies:
-#   FROM quay.io/modh/ray:2.52.1-py312-cu128
-#   RUN pip install feast[postgres,ray]==0.59.0 codeflare-sdk mlflow scikit-learn
+#   FROM {{RAY_IMAGE}}
+#   Install the pinned dependencies from the project's image recipe.
 # Then reference it in a custom ClusterTrainingRuntime.
 #
 # Architecture:
 # - Feast Feature Service: "training_features" (ensures consistency)
-# - Ray Compute Engine: KubeRay cluster (distributed processing)
+# - Optional Feast-Ray offline store: KubeRay cluster (compatibility pending)
 # - MLflow: Experiment tracking + Model Registry
 #
 apiVersion: trainer.kubeflow.org/v1alpha1
 kind: TrainJob
 metadata:
-  name: sales-forecasting-mlflow
-  namespace: feast-trainer-demo
+  name: {{TRAINJOB_NAME}}
+  namespace: {{DEMO_NAMESPACE}}
   labels:
-    app.kubernetes.io/name: sales-forecasting-mlflow
+    app.kubernetes.io/name: {{TRAINJOB_NAME}}
 spec:
   suspend: false
   runtimeRef:
-    name: torch-with-storage  # Custom runtime with PVC already mounted at /shared
+    name: {{TRAINING_RUNTIME}}  # Runtime with PVC mounted at the configured shared path
   trainer:
-    numNodes: 2  # Distributed training across 2 nodes
+    numNodes: {{TRAINING_NUM_NODES}}  # CPU-first single-node baseline by default
     resourcesPerNode:
       requests:
-        cpu: "4"
-        memory: "8Gi"
-        nvidia.com/gpu: "1"  # 1 GPU per node
+        cpu: "{{TRAINING_CPU_REQUEST}}"
+        memory: "{{TRAINING_MEMORY_REQUEST}}"
       limits:
-        cpu: "8"
-        memory: "16Gi"
-        nvidia.com/gpu: "1"
+        cpu: "{{TRAINING_CPU_LIMIT}}"
+        memory: "{{TRAINING_MEMORY_LIMIT}}"
     env:
     # Data paths
     - name: DATA_PATH
-      value: /shared/data
+      value: "{{DATA_DIR}}"
+    - name: FEAST_DATA_ROOT
+      value: "{{DATA_DIR}}"
+    - name: POSTGRES_URL
+      valueFrom:
+        secretKeyRef:
+          name: postgres-secret
+          key: url
+    - name: POSTGRES_PY_URL
+      valueFrom:
+        secretKeyRef:
+          name: postgres-secret
+          key: py-url
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-secret
+          key: password
     - name: OUTPUT_DIR
-      value: /shared/models
+      value: "{{MODEL_DIR}}"
     - name: FEATURE_REPO
-      value: /shared/feature_repo
+      value: "{{FEATURE_REPO_DIR}}"
     - name: NUM_EPOCHS
-      value: "50"  # More epochs for better convergence
+      value: "{{NUM_EPOCHS}}"
     # MLflow configuration
     - name: MLFLOW_TRACKING_URI
-      value: "http://mlflow.feast-trainer-demo.svc.cluster.local:5000"
+      value: "{{MLFLOW_TRACKING_URI}}"
     - name: MLFLOW_EXPERIMENT_NAME
-      value: "sales-forecasting"
-    - name: MLFLOW_ARTIFACT_ROOT
-      value: "/shared/mlflow-artifacts"
+      value: "{{MLFLOW_EXPERIMENT_NAME}}"
     # Model Registry configuration
     - name: MODEL_REGISTRY_URI
-      value: "sales-model-registry.feast-trainer-demo.svc.cluster.local:8080"
+      value: "{{MODEL_REGISTRY_URI}}"
     # KubeRay/CodeFlare SDK configuration (same as dataprep job)
     - name: FEAST_RAY_USE_KUBERAY
       value: "true"
     - name: FEAST_RAY_CLUSTER_NAME
-      value: "feast-ray"
+      value: "{{RAY_CLUSTER_NAME}}"
     - name: FEAST_RAY_NAMESPACE
-      value: "feast-trainer-demo"
+      value: "{{DEMO_NAMESPACE}}"
     - name: FEAST_RAY_SKIP_TLS
-      value: "true"
+      value: "false"
     # Increase elastic rendezvous timeout for long Feast+Ray data prep (~20 min)
     - name: TORCHELASTIC_RDZV_TIMEOUT
-      value: "3600"  # 60 minutes for rendezvous
+      value: "{{RDZV_TIMEOUT_SECONDS}}"
     - name: TORCH_NCCL_BLOCKING_WAIT
-      value: "1"
+      value: "{{NCCL_BLOCKING_WAIT}}"
+    - name: NCCL_IB_DISABLE
+      value: "{{NCCL_IB_DISABLE}}"
     - name: NCCL_TIMEOUT
-      value: "3600"  # 60 minutes for NCCL operations
+      value: "{{NCCL_TIMEOUT_SECONDS}}"
     - name: NCCL_ASYNC_ERROR_HANDLING
-      value: "1"
+      value: "{{NCCL_ASYNC_ERROR_HANDLING}}"
     - name: NCCL_DEBUG
-      value: "WARN"
+      value: "{{NCCL_DEBUG_LEVEL}}"
+    - name: MODEL_HIDDEN_DIMS
+      value: "{{MODEL_HIDDEN_DIMS}}"
+    - name: MODEL_DROPOUT
+      value: "{{MODEL_DROPOUT}}"
+    - name: TRAINING_BATCH_SIZE
+      value: "{{TRAINING_BATCH_SIZE}}"
+    - name: TRAINING_LEARNING_RATE
+      value: "{{TRAINING_LEARNING_RATE}}"
+    - name: TRAINING_WEIGHT_DECAY
+      value: "{{TRAINING_WEIGHT_DECAY}}"
+    - name: TRAINING_VALIDATION_FRACTION
+      value: "{{TRAINING_VALIDATION_FRACTION}}"
+    - name: TRAINING_NUM_WORKERS
+      value: "{{TRAINING_NUM_WORKERS}}"
+    - name: TRAINING_MAPE_MIN_TARGET
+      value: "{{TRAINING_MAPE_MIN_TARGET}}"
+    - name: TRAINING_LR_SCHEDULER_FACTOR
+      value: "{{TRAINING_LR_SCHEDULER_FACTOR}}"
+    - name: TRAINING_LR_SCHEDULER_PATIENCE
+      value: "{{TRAINING_LR_SCHEDULER_PATIENCE}}"
+    - name: TRAINING_RUN_PREFIX
+      value: "{{TRAINING_RUN_PREFIX}}"
+    - name: RANDOM_SEED
+      value: "{{RANDOM_SEED}}"
+    - name: MODEL_REGISTRY_NAME
+      value: "{{MODEL_REGISTRY_NAME}}"
+    - name: MODEL_REGISTRY_AUTHOR
+      value: "{{MODEL_REGISTRY_AUTHOR}}"
+    - name: MODEL_REGISTRY_PORT
+      value: "{{MODEL_REGISTRY_PORT}}"
+    - name: MODEL_REGISTRY_SECURE
+      value: "{{MODEL_REGISTRY_SECURE}}"
     command:
     - bash
     - -c
@@ -85,9 +135,8 @@ spec:
       # Install dependencies (Feast + Ray + CodeFlare + MLflow)
       # Use mlflow 3.x to match server (supports logged-models API)
       echo "📦 Installing dependencies..."
-      pip install --quiet --target=/tmp/pylibs \
-        "feast[postgres,ray]==0.59.0" codeflare-sdk psycopg2-binary \
-        scikit-learn joblib pyarrow "mlflow>=3.0"
+      IFS='|' read -r -a TRAINING_PACKAGE_LIST <<< "{{TRAINING_PACKAGES}}"
+      pip install --quiet --target=/tmp/pylibs "${TRAINING_PACKAGE_LIST[@]}" "mlflow=={{MLFLOW_VERSION}}"
       
       export PYTHONPATH=/tmp/pylibs:$PYTHONPATH
       export PATH=/tmp/pylibs/bin:$PATH
@@ -119,19 +168,27 @@ spec:
       logger = logging.getLogger(__name__)
 
       # Configuration
-      DATA_PATH = os.environ.get("DATA_PATH", "/shared/data")
-      OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/shared/models")
-      FEATURE_REPO = os.environ.get("FEATURE_REPO", "/shared/feature_repo")
-      NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 15))
-      MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-      MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "sales-forecasting")
+      DATA_PATH = os.environ.get("DATA_PATH", "{{DATA_DIR}}")
+      OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "{{MODEL_DIR}}")
+      FEATURE_REPO = os.environ.get("FEATURE_REPO", "{{FEATURE_REPO_DIR}}")
+      NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", "{{NUM_EPOCHS}}"))
+      VALIDATION_FRACTION = float(os.environ.get("TRAINING_VALIDATION_FRACTION", "{{TRAINING_VALIDATION_FRACTION}}"))
+      RANDOM_SEED = int(os.environ.get("RANDOM_SEED", "{{RANDOM_SEED}}"))
+      np.random.seed(RANDOM_SEED)
+      torch.manual_seed(RANDOM_SEED)
+      MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "{{MLFLOW_TRACKING_URI}}")
+      MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "{{MLFLOW_EXPERIMENT_NAME}}")
+      sys.path.insert(0, FEATURE_REPO)
+      from forecast_contract import MODEL_FEATURE_COLUMNS, chronological_split
 
       # =================================================================
       # MODEL DEFINITION
       # =================================================================
       class SalesMLP(nn.Module):
-          def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.2):
+          def __init__(self, input_dim, hidden_dims=None, dropout=None):
               super().__init__()
+              hidden_dims = hidden_dims or [int(x) for x in os.environ["MODEL_HIDDEN_DIMS"].split(",")]
+              dropout = float(os.environ["MODEL_DROPOUT"]) if dropout is None else dropout
               layers = []
               prev_dim = input_dim
               for dim in hidden_dims:
@@ -162,7 +219,7 @@ spec:
       # =================================================================
       backend = 'nccl' if torch.cuda.is_available() else 'gloo'
       # Set long timeout for Feast+Ray data prep (rank 0 takes ~20 min)
-      dist.init_process_group(backend=backend, timeout=timedelta(minutes=60))
+      dist.init_process_group(backend=backend, timeout=timedelta(seconds=int(os.environ.get("NCCL_TIMEOUT_SECONDS", "{{NCCL_TIMEOUT_SECONDS}}"))))
       rank, world_size = dist.get_rank(), dist.get_world_size()
       local_rank = int(os.environ.get("LOCAL_RANK", 0))
       device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -176,7 +233,7 @@ spec:
           mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
           
           # Start MLflow run
-          run = mlflow.start_run(run_name=f"train-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+          run = mlflow.start_run(run_name=f"{os.environ.get('TRAINING_RUN_PREFIX', '{{TRAINING_RUN_PREFIX}}')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
           logger.info(f"MLflow tracking URI: {MLFLOW_TRACKING_URI}")
           logger.info(f"MLflow run ID: {run.info.run_id}")
           
@@ -188,23 +245,10 @@ spec:
           })
 
       # =================================================================
-      # FEAST + RAY: GET HISTORICAL FEATURES (Production Architecture)
+      # FEAST HISTORICAL FEATURE RETRIEVAL
       # =================================================================
-      # WHY USE THIS OVER DIRECT PARQUET?
-      # 
-      # | Data Size | Direct Parquet | Feast + Ray | Winner      |
-      # |-----------|----------------|-------------|-------------|
-      # | 100K rows | 1 sec          | ~3 min      | Parquet     |
-      # | 10M rows  | 30 min (OOM)   | ~10 min     | Feast+Ray   |
-      # | 100M rows | Impossible     | ~30 min     | Feast+Ray   |
-      # | 1B rows   | Impossible     | ~2-4 hours  | Feast+Ray   |
-      #
-      # PRODUCTION BENEFITS:
-      # 1. Train-Serve Consistency: Same FeatureService in training & inference
-      # 2. Point-in-Time Correctness: Automatic temporal joins, no data leakage
-      # 3. Feature Versioning: Feast tracks all feature definitions
-      # 4. Scalability: Ray distributes PIT joins across cluster
-      # 5. Reproducibility: Can recreate exact training dataset anytime
+      # The synthetic 65K-row fixture demonstrates the integration path; it is
+      # not a benchmark showing that Ray outperforms a local Parquet read.
       #
       if rank == 0:
           os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -212,8 +256,7 @@ spec:
           logger.info("=" * 60)
           logger.info("FEAST + RAY: GET_HISTORICAL_FEATURES")
           logger.info("=" * 60)
-          logger.info("Production architecture for train-serve consistency")
-          logger.info("Ray distributes PIT joins across KubeRay cluster")
+          logger.info("Using the versioned Feast training feature service")
           logger.info("")
           
           from feast import FeatureStore
@@ -229,12 +272,12 @@ spec:
           # Create entity DataFrame (what we want features for)
           logger.info("Creating entity DataFrame...")
           entity_rows = []
-          base_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+          base_date = datetime.fromisoformat(os.getenv("DATA_START_DATE", "{{DATA_START_DATE}}")).replace(tzinfo=timezone.utc)
           
           # Scale parameters (matches DataPrep)
-          NUM_WEEKS = int(os.getenv("NUM_WEEKS", "104"))
-          NUM_STORES = int(os.getenv("NUM_STORES", "45"))
-          NUM_DEPTS = int(os.getenv("NUM_DEPTS", "14"))
+          NUM_WEEKS = int(os.getenv("NUM_WEEKS", "{{NUM_WEEKS}}"))
+          NUM_STORES = int(os.getenv("NUM_STORES", "{{NUM_STORES}}"))
+          NUM_DEPTS = int(os.getenv("NUM_DEPARTMENTS", "{{NUM_DEPARTMENTS}}"))
           
           for week in range(NUM_WEEKS):
               event_ts = base_date + timedelta(weeks=week)
@@ -252,7 +295,7 @@ spec:
           
           # Get historical features via Ray (distributed PIT joins)
           logger.info("")
-          logger.info("Calling get_historical_features() via KubeRay...")
+          logger.info("Calling get_historical_features() via the configured Feast offline store...")
           logger.info("   Feature Service: training_features")
           logger.info("   This ensures SAME features used in training & inference!")
           logger.info("")
@@ -311,18 +354,16 @@ spec:
               "dataset_version": dataset_version,
           })
           
-          # Drop rows with missing target
-          training_df = training_df.dropna(subset=["weekly_sales"])
+          # Remove warm-up rows instead of filling unavailable history with zero.
+          training_df = training_df.dropna(subset=["weekly_sales", *MODEL_FEATURE_COLUMNS])
           
           # Handle timestamp column naming (DataPrep saves as 'date')
           if "date" in training_df.columns and "event_timestamp" not in training_df.columns:
               training_df = training_df.rename(columns={"date": "event_timestamp"})
           
-          # Temporal split (80/20 based on time)
+          # Split on unique target weeks; never divide one week across partitions.
           training_df = training_df.sort_values("event_timestamp")
-          split_idx = int(len(training_df) * 0.8)
-          train_df = training_df.iloc[:split_idx]
-          val_df = training_df.iloc[split_idx:]
+          train_df, val_df = chronological_split(training_df, VALIDATION_FRACTION)
           
           logger.info(f"Train: {len(train_df):,}, Val: {len(val_df):,}")
           
@@ -333,11 +374,8 @@ spec:
               "val_rows": len(val_df),
           })
           
-          # Feature columns (exclude identifiers and target)
-          exclude_cols = ["store_id", "dept_id", "date", "event_timestamp", "weekly_sales"]
-          feature_cols = [c for c in training_df.columns 
-                          if c not in exclude_cols
-                          and training_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+          # Explicit allow-list prevents labels and unavailable covariates entering X.
+          feature_cols = list(MODEL_FEATURE_COLUMNS)
           
           logger.info(f"Feature columns ({len(feature_cols)}): {feature_cols}")
           
@@ -445,18 +483,18 @@ spec:
                   "registry": "postgres",
               },
               "ray_cluster": {
-                  "cluster_name": os.environ.get("FEAST_RAY_CLUSTER_NAME", "feast-ray"),
-                  "namespace": os.environ.get("FEAST_RAY_NAMESPACE", "feast-trainer-demo"),
+                  "cluster_name": os.environ.get("FEAST_RAY_CLUSTER_NAME", "{{RAY_CLUSTER_NAME}}"),
+                  "namespace": os.environ.get("FEAST_RAY_NAMESPACE", "{{DEMO_NAMESPACE}}"),
               },
               "environment": {
                   "python_version": sys.version,
                   "torch_version": torch.__version__,
-                  "feast_version": "0.59.0",
+                  "feast_version": "{{FEAST_CLIENT_VERSION}}",
                   "mlflow_version": mlflow.__version__,
               },
               "training_config": {
-                  "train_split": 0.8,
-                  "val_split": 0.2,
+                  "train_split": 1 - VALIDATION_FRACTION,
+                  "val_split": VALIDATION_FRACTION,
                   "scaling": "StandardScaler",
               },
           }
@@ -501,11 +539,11 @@ spec:
       logger.info("=" * 60)
 
       # Hyperparameters (tuned for better performance)
-      BATCH_SIZE = 64  # Smaller batches = more gradient updates
-      LEARNING_RATE = 5e-4  # Lower LR for stability
-      WEIGHT_DECAY = 1e-3  # Stronger regularization
-      HIDDEN_DIMS = [512, 256, 128, 64]  # Deeper network
-      DROPOUT = 0.3  # More dropout to prevent overfitting
+      BATCH_SIZE = int(os.environ.get("TRAINING_BATCH_SIZE", "{{TRAINING_BATCH_SIZE}}"))
+      LEARNING_RATE = float(os.environ.get("TRAINING_LEARNING_RATE", "{{TRAINING_LEARNING_RATE}}"))
+      WEIGHT_DECAY = float(os.environ.get("TRAINING_WEIGHT_DECAY", "{{TRAINING_WEIGHT_DECAY}}"))
+      HIDDEN_DIMS = [int(dim) for dim in os.environ.get("MODEL_HIDDEN_DIMS", "{{MODEL_HIDDEN_DIMS}}").split(",")]
+      DROPOUT = float(os.environ.get("MODEL_DROPOUT", "{{MODEL_DROPOUT}}"))
 
       if rank == 0:
           mlflow.log_params({
@@ -520,14 +558,14 @@ spec:
       train_ds = SalesDataset(X_train, y_train)
       val_ds = SalesDataset(X_val, y_val)
       sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank)
-      train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2)
-      val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+      train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=int(os.environ.get("TRAINING_NUM_WORKERS", "{{TRAINING_NUM_WORKERS}}")))
+      val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=int(os.environ.get("TRAINING_NUM_WORKERS", "{{TRAINING_NUM_WORKERS}}")))
 
       model = SalesMLP(input_dim, HIDDEN_DIMS, DROPOUT).to(device)
       model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
 
       optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-      scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
+      scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=float(os.environ.get("TRAINING_LR_SCHEDULER_FACTOR", "{{TRAINING_LR_SCHEDULER_FACTOR}}")), patience=int(os.environ.get("TRAINING_LR_SCHEDULER_PATIENCE", "{{TRAINING_LR_SCHEDULER_PATIENCE}}")))
       criterion = nn.MSELoss()  # MSE works well with log-transformed target
       logger.info("Using MSE loss with log-transformed target (equivalent to optimizing RMSLE)")
 
@@ -690,7 +728,7 @@ spec:
               from mlflow.tracking import MlflowClient
               client = MlflowClient()
               model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
-              result = mlflow.register_model(model_uri, "sales-forecasting-mlp")
+              result = mlflow.register_model(model_uri, os.environ.get("MODEL_REGISTRY_NAME", "{{MODEL_REGISTRY_NAME}}"))
               logger.info(f"Model registered: {result.name} v{result.version}")
           except Exception as e:
               logger.warning(f"Model registration skipped: {e}")
@@ -744,14 +782,14 @@ spec:
                   # Connect to Model Registry
                   registry = ModelRegistry(
                       server_address=MODEL_REGISTRY_URI,
-                      port=8080,
-                      author="kubeflow-training",
-                      is_secure=False,
+                      port=int(os.environ.get("MODEL_REGISTRY_PORT", "{{MODEL_REGISTRY_PORT}}")),
+                      author=os.environ.get("MODEL_REGISTRY_AUTHOR", "{{MODEL_REGISTRY_AUTHOR}}"),
+                      is_secure=os.environ.get("MODEL_REGISTRY_SECURE", "{{MODEL_REGISTRY_SECURE}}").lower() == "true",
                   )
                   
                   # Register model
                   registered_model = registry.register_model(
-                      name="sales-forecasting",
+                      name=os.environ.get("MODEL_REGISTRY_NAME", "{{MODEL_REGISTRY_NAME}}"),
                       uri=artifact_uri,
                       version=f"v{datetime.now().strftime('%Y%m%d%H%M%S')}",
                       description=f"Sales demand forecasting MLP - MAPE: {best_mape:.1f}%",
@@ -779,7 +817,7 @@ spec:
           logger.info("=" * 60)
           logger.info(f"   Data Source: Feast get_historical_features()")
           logger.info(f"   Feature Service: training_features")
-          logger.info(f"   Compute Engine: KubeRay (CodeFlare SDK)")
+          logger.info(f"   Configured retrieval: Feast-Ray via KubeRay (compatibility pending)")
           logger.info(f"   Best val_loss: {best_val_loss:.4f}")
           logger.info(f"   Best MAPE: {best_mape:.1f}%")
           logger.info(f"   Model saved to: {OUTPUT_DIR}/best_model.pt")

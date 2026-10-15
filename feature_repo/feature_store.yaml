@@ -1,7 +1,7 @@
 # Feast Feature Store Configuration
 # For feast apply and materialize (file-based offline store)
 #
-# NAMESPACE: feast-trainer-demo
+# NAMESPACE: {{DEMO_NAMESPACE}}
 #
 # Architecture:
 # - Registry: PostgreSQL (SQL-queryable)
@@ -10,15 +10,15 @@
 #
 # NOTE: For distributed training with Ray, use feature_store_ray.yaml
 
-project: sales_forecasting
+project: {{FEAST_PROJECT}}
 
 provider: local
 
 # PostgreSQL registry for feature definitions
 registry:
   registry_type: sql
-  path: postgresql://feast:feast123@postgres.feast-trainer-demo.svc.cluster.local:5432/feast
-  cache_ttl_seconds: 60
+  path: "${POSTGRES_URL}"
+  cache_ttl_seconds: {{FEAST_REGISTRY_CACHE_TTL_SECONDS}}
 
 # File-based offline store (for feast apply/materialize)
 offline_store:
@@ -27,11 +27,11 @@ offline_store:
 # PostgreSQL online store for low-latency serving
 online_store:
   type: postgres
-  host: postgres.feast-trainer-demo.svc.cluster.local
-  port: 5432
-  database: feast
-  db_schema: public
-  user: feast
-  password: feast123
+  host: {{POSTGRES_HOST}}
+  port: {{POSTGRES_PORT}}
+  database: {{POSTGRES_DATABASE}}
+  db_schema: "{{FEAST_DB_SCHEMA}}"
+  user: "{{POSTGRES_USERNAME}}"
+  password: "${POSTGRES_PASSWORD}"
 
-entity_key_serialization_version: 3
+entity_key_serialization_version: {{FEAST_ENTITY_KEY_SERIALIZATION_VERSION}}

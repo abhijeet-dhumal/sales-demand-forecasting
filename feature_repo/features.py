@@ -1,5 +1,5 @@
 """
-Sales Demand Forecasting Feature Definitions
+Walmart Sales Forecasting Feature Definitions
 
 This module defines Feast feature store resources for the Walmart-style sales forecasting use case.
 
@@ -10,24 +10,19 @@ Architecture:
 - Compute Engine: Ray (distributed get_historical_features)
 
 Entities:
-- store_id: Store identifier (1-45)
-- dept_id: Department identifier (1-10)
+- store_id: Store identifier
+- dept_id: Department identifier
 
 Feature Views:
-- sales_features: Weekly sales with lag features, temporal, and economic indicators
+- sales_features: Target-week calendar and strictly prior sales features
 - store_features: Static store metadata (type, size, region)
 
 Feature Services:
 - training_features: Full feature set for model training (includes target)
 - inference_features: Features for inference (excludes target)
 
-Feature Importance (typical retail forecasting):
-- Lag_1, Lag_2        : 35% - Most predictive (recent history)
-- Rolling stats       : 28% - Trend and volatility
-- Week_of_year, Month : 18% - Seasonality patterns
-- Is_holiday          : 10% - Holiday effects
-- Economic indicators :  7% - External factors
-- Store features      :  2% - Store context
+Target-week rows are one-week-ahead forecasts. Actual future weather and
+economic observations are deliberately excluded from both FeatureServices.
 """
 
 from datetime import timedelta
@@ -41,14 +36,14 @@ from feast.types import Float32, Int32, String
 
 store_entity = Entity(
     name="store_id",
-    description="Store identifier (1-45)",
+    description="Store identifier",
     join_keys=["store_id"],
     tags={"team": "sales", "priority": "high"},
 )
 
 dept_entity = Entity(
     name="dept_id",
-    description="Department identifier (1-10)",
+    description="Department identifier",
     join_keys=["dept_id"],
     tags={"team": "sales"},
 )
@@ -57,19 +52,12 @@ dept_entity = Entity(
 # =============================================================================
 # DATA SOURCES (Parquet files on shared PVC - pre-sorted for fast PIT joins)
 # =============================================================================
-# NOTE: Path depends on mount point:
-#   - RHOAI Workbench: /opt/app-root/src/shared/data/
-#   - TrainJob/Pods:   /shared/data/
-
+# Callers set FEAST_DATA_ROOT to the shared feature data path before loading this module.
 import os
-# Auto-detect mount path: /shared (TrainJob/Ray) vs /opt/app-root/src/shared (Workbench)
-def _get_data_root():
-    if os.environ.get("FEAST_DATA_ROOT"):
-        return os.environ["FEAST_DATA_ROOT"]
-    if os.path.exists("/shared/data"):
-        return "/shared/data"
-    return "/opt/app-root/src/shared/data"
-_DATA_ROOT = _get_data_root()
+
+_DATA_ROOT = os.environ.get("FEAST_DATA_ROOT")
+if not _DATA_ROOT:
+    raise RuntimeError("Set FEAST_DATA_ROOT before loading Feast features")
 
 sales_source = FileSource(
     path=f"{_DATA_ROOT}/sales_features.parquet",
@@ -90,23 +78,24 @@ store_source = FileSource(
 
 sales_features = FeatureView(
     name="sales_features",
-    description="Weekly sales metrics with optimized features for accurate forecasting",
+    description="One-week-ahead target rows with strictly prior sales history",
     entities=[store_entity, dept_entity],
-    ttl=timedelta(days=90),
+    # Competition timestamps are historical; this demo replays the first test week today.
+    ttl=timedelta(0),
     schema=[
         # Target variable
         Field(name="weekly_sales", dtype=Float32, description="Weekly sales amount ($)"),
         
-        # === LAG FEATURES (35% importance) - Recent history ===
-        Field(name="lag_1", dtype=Float32, description="Sales from 1 week ago"),
+        # Lag and rolling fields are computed strictly before the target week.
+        Field(name="lag_1", dtype=Float32, description="Sales from the forecast origin week"),
         Field(name="lag_2", dtype=Float32, description="Sales from 2 weeks ago"),
         Field(name="lag_4", dtype=Float32, description="Sales from 4 weeks ago"),
         Field(name="lag_8", dtype=Float32, description="Sales from 8 weeks ago"),
         
         # === ROLLING STATISTICS (28% importance) - Trend & volatility ===
-        Field(name="rolling_mean_4w", dtype=Float32, description="4-week rolling average"),
-        Field(name="rolling_std_4w", dtype=Float32, description="4-week rolling std (volatility)"),
-        Field(name="sales_vs_avg", dtype=Float32, description="Current/rolling_mean ratio (momentum)"),
+        Field(name="rolling_mean_4w", dtype=Float32, description="Prior four observed weeks through the origin"),
+        Field(name="rolling_std_4w", dtype=Float32, description="Prior four-week sales volatility"),
+        Field(name="sales_vs_avg", dtype=Float32, description="Origin-week sales relative to prior four-week mean"),
         
         # === TEMPORAL FEATURES (18% importance) - Seasonality ===
         Field(name="week_of_year", dtype=Int32, description="Week 1-52 (yearly seasonality)"),
@@ -119,11 +108,8 @@ sales_features = FeatureView(
         Field(name="is_holiday", dtype=Int32, description="Holiday week indicator (0/1)"),
         Field(name="days_to_holiday", dtype=Int32, description="Days until next major holiday"),
         
-        # === ECONOMIC INDICATORS (7% importance) ===
-        Field(name="temperature", dtype=Float32, description="Regional temperature (°F)"),
-        Field(name="fuel_price", dtype=Float32, description="Fuel price ($/gallon)"),
-        Field(name="cpi", dtype=Float32, description="Consumer Price Index"),
-        Field(name="unemployment", dtype=Float32, description="Unemployment rate (%)"),
+        Field(name="origin_week", dtype=String, description="Last week available to the forecaster"),
+        Field(name="target_week", dtype=String, description="Week being forecast"),
     ],
     source=sales_source,
     online=True,
@@ -134,8 +120,10 @@ store_features = FeatureView(
     name="store_features",
     description="Static store metadata",
     entities=[store_entity, dept_entity],
-    ttl=timedelta(days=365),
+    ttl=None,
     schema=[
+        Field(name="store_index", dtype=Int32, description="Numeric store identifier supplied as a model input"),
+        Field(name="department_index", dtype=Int32, description="Numeric department identifier supplied as a model input"),
         Field(name="store_type", dtype=String, description="Store type: A, B, or C"),
         Field(name="store_size", dtype=Int32, description="Store square footage"),
         Field(name="region", dtype=String, description="Geographic region"),
@@ -150,49 +138,37 @@ store_features = FeatureView(
 # FEATURE SERVICES
 # =============================================================================
 
-# Training: includes target variable (weekly_sales)
-# Optimized feature set for maximum prediction accuracy
+# Training includes the label and the same forecast inputs used at inference.
 training_features = FeatureService(
     name="training_features",
-    description="Optimized feature set for model training (includes target)",
+    description="One-week-ahead training rows with a separate target label",
     features=[
         sales_features[[
-            # Target
             "weekly_sales",
-            # Lag features (35% importance)
             "lag_1", "lag_2", "lag_4", "lag_8",
-            # Rolling stats (28% importance)
             "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
-            # Temporal (18% importance)
             "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
-            # Holiday (10% importance)
             "is_holiday", "days_to_holiday",
-            # Economic (7% importance)
-            "temperature", "fuel_price", "cpi", "unemployment",
+            "origin_week", "target_week",
         ]],
-        store_features[["store_type", "store_size", "region"]],
+        store_features[["store_index", "department_index", "store_size"]],
     ],
-    tags={"stage": "training", "model": "demand-forecasting", "version": "v2-optimized"},
+    tags={"stage": "training", "model": "demand-forecasting", "version": "one-week-ahead-v1"},
 )
 
 # Inference: excludes target variable
 inference_features = FeatureService(
     name="inference_features",
-    description="Features for real-time inference (excludes target)",
+    description="Forecast inputs and target-week metadata, excluding target sales",
     features=[
         sales_features[[
-            # Lag features
             "lag_1", "lag_2", "lag_4", "lag_8",
-            # Rolling stats
             "rolling_mean_4w", "rolling_std_4w", "sales_vs_avg",
-            # Temporal
             "week_of_year", "month", "quarter", "week_of_month", "is_month_end",
-            # Holiday
             "is_holiday", "days_to_holiday",
-            # Economic
-            "temperature", "fuel_price", "cpi", "unemployment",
+            "origin_week", "target_week",
         ]],
-        store_features[["store_type", "store_size", "region"]],
+        store_features[["store_index", "department_index", "store_size"]],
     ],
-    tags={"stage": "inference", "model": "demand-forecasting", "version": "v2-optimized"},
+    tags={"stage": "inference", "model": "demand-forecasting", "version": "one-week-ahead-v1"},
 )

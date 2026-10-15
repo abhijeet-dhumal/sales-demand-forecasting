@@ -1,0 +1,16 @@
+flowchart LR
+    NB["Notebook 03<br/>reads latest_candidate.json"]
+    KS["KServe InferenceService<br/>internal predictor service"]
+    PVC[("Shared PVC<br/>model + scalers")]
+    FEAST["Feast Server<br/>ClusterIP"]
+    PG[("PostgreSQL<br/>online features")]
+    RESP["Forecast<br/>target week + sales"]
+
+    NB -->|deploy model| KS
+    KS -->|load artifacts| PVC
+    NB -->|internal V2 request| KS
+    KS -->|get_online_features| FEAST --> PG
+    PG --> FEAST --> KS --> RESP
+
+    note1["Public Route is not part of the manifests.<br/>Use operator OIDC before external exposure."]
+    KS -.-> note1

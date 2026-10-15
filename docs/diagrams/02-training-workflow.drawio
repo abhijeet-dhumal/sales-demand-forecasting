@@ -1,0 +1,156 @@
+<mxfile host="app.diagrams.net" modified="2024-03-16T23:55:00.000Z" agent="diagram-generator" version="21.0.0">
+  <diagram name="Training Workflow" id="training-workflow">
+    <mxGraphModel dx="1560" dy="620" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1560" pageHeight="620" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Title -->
+        <mxCell id="title" value="Distributed Training Pipeline" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="70" y="30" width="350" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Kubeflow Training Operator + PyTorch DDP + Feast + MLflow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="60" width="450" height="25" as="geometry" />
+        </mxCell>
+        
+        <!-- Row 1: Main Flow -->
+        
+        <mxCell id="sdk" value="&lt;b&gt;Kubeflow SDK&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;TrainerClient&lt;br&gt;.train()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="70" y="120" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="operator" value="&lt;b&gt;Training Operator&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Creates TrainJob&lt;br&gt;Manages lifecycle&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="260" y="120" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="workers" value="&lt;b&gt;Trainer Pod&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;1 CPU node by default&lt;br&gt;scale after profiling&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="120" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="feast" value="&lt;b&gt;Feast SDK&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;get_historical&lt;br&gt;_features()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="660" y="120" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="ddp" value="&lt;b&gt;PyTorch DDP&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Distributed&lt;br&gt;Training&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="850" y="120" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="save" value="&lt;b&gt;Save Model&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;best_model.pt&lt;br&gt;+ scalers&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="120" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mlflow" value="&lt;b&gt;MLflow&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Log metrics&lt;br&gt;&amp;amp; model&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="120" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="done" value="&lt;b&gt;Done&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1400" y="140" width="60" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Row 2: Infrastructure -->
+        
+        <mxCell id="ray" value="&lt;b&gt;Ray Cluster&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#cef&quot;&gt;Distributed&lt;br&gt;queries&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#028CF0;strokeColor=#0066b3;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="670" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="pvc" value="&lt;b&gt;Shared PVC&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Model files&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mlflowdb" value="&lt;b&gt;MLflow&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555&quot;&gt;Registry&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="300" width="100" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Main Flow Arrows -->
+        <mxCell id="a1" value="TrainJob" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="190" y="160" as="sourcePoint" />
+            <mxPoint x="260" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a2" value="spawn" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="400" y="160" as="sourcePoint" />
+            <mxPoint x="470" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a3" value="gRPC" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="590" y="160" as="sourcePoint" />
+            <mxPoint x="660" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a4" value="65K rows" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="780" y="160" as="sourcePoint" />
+            <mxPoint x="850" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a5" value="best" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="970" y="160" as="sourcePoint" />
+            <mxPoint x="1040" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a6" value="log" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;fontSize=10;fontColor=#555555;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="-0.15" y="12" relative="1" as="geometry">
+            <mxPoint x="1160" y="160" as="sourcePoint" />
+            <mxPoint x="1230" y="160" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a7" value="" style="endArrow=classic;html=1;rounded=0;strokeWidth=2;strokeColor=#555555;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1330" y="160" as="sourcePoint" />
+            <mxPoint x="1400" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Infrastructure Arrows -->
+        <mxCell id="a8" value="distribute" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="720" y="200" as="sourcePoint" />
+            <mxPoint x="720" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a9" value="save" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="1100" y="200" as="sourcePoint" />
+            <mxPoint x="1100" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="a10" value="track" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#888888;fontSize=10;fontColor=#888888;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry x="0.15" y="-12" relative="1" as="geometry">
+            <mxPoint x="1280" y="200" as="sourcePoint" />
+            <mxPoint x="1280" y="300" as="targetPoint" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Bottom summary -->
+        <mxCell id="summary_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#e2e8f0;" vertex="1" parent="1">
+          <mxGeometry x="70" y="420" width="1390" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="summary" value="&lt;b&gt;Key:&lt;/b&gt; Start with the CPU baseline; add workers or GPUs only when profiling shows a benefit." style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="425" width="1390" height="40" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,97 +1,47 @@
-%%{init: {
-  'theme': 'base',
-  'themeVariables': {
-    'actorBkg': '#e3f2fd',
-    'actorTextColor': '#1a1a1a',
-    'actorBorder': '#90caf9',
-    'signalColor': '#1a1a1a',
-    'signalTextColor': '#1a1a1a',
-    'labelBoxBkgColor': '#e8eaf6',
-    'labelTextColor': '#1a1a1a',
-    'loopTextColor': '#1a1a1a',
-    'noteBkgColor': '#fffde7',
-    'noteTextColor': '#1a1a1a',
-    'activationBkgColor': '#ffcc80',
-    'sequenceNumberColor': '#1a1a1a'
-  }
-}}%%
-
 sequenceDiagram
     autonumber
+    actor DS as Data Scientist
+    participant WB as OpenShift AI Workbench
+    participant PVC as Shared PVC
+    participant PG as PostgreSQL
+    participant Feast as Feast Server
+    participant Ray as KubeRay
+    participant Trainer as Kubeflow Trainer
+    participant MLflow as RHOAI MLflow
+    participant KServe as KServe
 
-    participant DS as 👨‍🔬 Data Scientist
-    participant PVC as 💾 Shared PVC
-    participant Ray as ⚡ KubeRay
-    participant PG as 🐘 PostgreSQL
-    participant Feast as 🍕 Feast
-    participant KF as 🎯 Kubeflow
-    participant MLF as 📈 MLflow
-    participant KServe as 🚀 KServe
-
-    %% ==================== PHASE 1: FEATURE ENGINEERING ====================
     rect rgb(227, 242, 253)
-        Note over DS,Feast: 📊 Phase 1: Feature Engineering (01-feast-features.ipynb)
-        
-        DS->>DS: Generate sales data (65K rows)
-        DS->>PVC: Save parquet files
-        
-        DS->>Feast: feast apply
-        activate Feast
-        Feast->>PG: Register entities, views, services
-        Feast-->>DS: ✓ Features registered
-        deactivate Feast
-        
-        DS->>Feast: feast materialize
-        activate Feast
-        Feast->>PG: Write to online store
-        Feast-->>DS: ✓ Materialization complete
-        deactivate Feast
+        Note over DS,PG: Notebook 01 — real Walmart competition data
+        DS->>WB: Upload train/test/features/stores CSV files
+        WB->>WB: Validate, join, create prior-only features with pandas
+        WB->>PVC: Write Parquet sources
+        WB->>Feast: FeatureStore.apply() + FeatureStore.materialize()
+        Feast->>PG: Registry + online feature writes
     end
 
-    %% ==================== PHASE 2: MODEL TRAINING ====================
     rect rgb(255, 243, 224)
-        Note over DS,MLF: 🎯 Phase 2: Distributed Training (02-training.ipynb)
-        
-        DS->>KF: Submit TrainJob via SDK (2 nodes × 1 GPU)
-        activate KF
-        
-        KF->>Feast: get_historical_features()
-        activate Feast
-        Feast->>Ray: Distributed PIT joins
-        activate Ray
-        Ray->>PVC: Read parquet partitions
-        Ray-->>Feast: Training DataFrame
-        deactivate Ray
-        Feast-->>KF: Features (65K × 20 cols)
-        deactivate Feast
-        
-        KF->>KF: Train PyTorch MLP (DDP)
-        KF->>PVC: Save model.pt, scalers.joblib
-        KF->>MLF: Log metrics (MAPE ~3-5%)
-        
-        KF-->>DS: ✓ Training complete
-        deactivate KF
+        Note over DS,MLflow: Notebook 02 — training and evaluation
+        DS->>WB: Run rolling-origin evaluation and submit TrainJob
+        WB->>Trainer: Submit unique TrainJob name
+        Trainer->>Feast: get_historical_features(training_features)
+        Feast->>Ray: Point-in-time joins (optional plugin path)
+        Ray-->>Feast: Historical rows
+        Feast-->>Trainer: Bounded result for rank-0 pandas preparation
+        Trainer->>PVC: Save model, metrics, report in unique run directory
+        Trainer-->>WB: Complete
+        WB->>MLflow: Log metrics/artifacts with Workbench integration
+        Note over WB,Trainer: Workbench OAuth token is not forwarded to the Trainer pod
     end
 
-    %% ==================== PHASE 3: INFERENCE ====================
     rect rgb(232, 245, 233)
-        Note over DS,KServe: 🚀 Phase 3: Model Serving (03-inference.ipynb)
-        
-        DS->>KServe: Deploy InferenceService
-        activate KServe
-        KServe->>PVC: Load model + scalers
-        KServe-->>DS: ✓ Endpoint ready
-        deactivate KServe
-        
-        DS->>KServe: POST {store_id: 1, dept_id: 3}
-        activate KServe
+        Note over DS,KServe: Notebook 03 — internal inference
+        DS->>WB: Deploy model from latest_candidate.json
+        WB->>KServe: Create InferenceService
+        KServe->>PVC: Load model and scalers
+        DS->>KServe: V2 request with Store/Dept and forecast origin
         KServe->>Feast: get_online_features()
-        Feast->>PG: Query (~5ms)
-        PG-->>Feast: Feature vector
-        Feast-->>KServe: 20 features
-        KServe->>KServe: Scale → Predict → Inverse
-        KServe-->>DS: {prediction: $107,197}
-        deactivate KServe
+        Feast->>PG: Read online feature vector
+        PG-->>Feast: Prior-only features
+        Feast-->>KServe: Feature vector
+        KServe-->>DS: Forecast for target week
     end
-
-    Note over Feast: 🔑 Same FeatureService for training & inference = Zero skew

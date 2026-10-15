@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: feast-trainer-demo
+  name: {{DEMO_NAMESPACE}}
   labels:
     app.kubernetes.io/name: feast-mlops
 ---
@@ -11,10 +11,11 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: shared
+  name: {{SHARED_PVC_NAME}}
 spec:
   accessModes:
     - ReadWriteMany
+  storageClassName: {{SHARED_STORAGE_CLASS}}
   resources:
     requests:
-      storage: 50Gi
+      storage: {{SHARED_PVC_SIZE}}

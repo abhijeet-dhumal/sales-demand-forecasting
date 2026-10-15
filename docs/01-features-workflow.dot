@@ -1,0 +1,22 @@
+digraph features_workflow {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.35", ranksep="0.4", fontname="Arial"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=16, margin="0.2,0.2", penwidth=1.4];
+  edge [fontname="Arial", fontsize=10, color="#526a78", fontcolor="#344955", penwidth=1.5, arrowsize=0.8];
+
+  data [label="Walmart competition data\nKaggle source files\ntrain.csv • test.csv\nfeatures.csv • stores.csv", fillcolor="#e8f5e9", color="#82b366"];
+  transform [label="Pandas feature\nengineering\nprior sales lags • rolling stats\ncalendar + holiday signals", fillcolor="#e3f2fd", color="#6c8ebf"];
+  parquet [label="Shared RWX PVC\nsales_features.parquet\nstore_features.parquet", fillcolor="#e1f5fe", color="#4a9fc5"];
+  sdk [label="Feast Python SDK\nFeatureStore.apply()\nFeatureStore.materialize()\nRegister definitions\nPopulate online store", fillcolor="#fff3e0", color="#d6a34a"];
+  postgres [label="PostgreSQL\nregistry metadata\nonline feature values\nserved through Feast", shape=cylinder, fillcolor="#f3e5f5", color="#ae75b5"];
+  ready [label="Ready for Notebook 02\nRay-backed history\nReady for Notebook 03\nonline lookup", fillcolor="#e8f5e9", color="#4caf50"];
+  ray [label="Notebook 02\nFeast Ray batch engine\ndistributed historical retrieval", fillcolor="#f5f5f5", color="#888888"];
+
+  { rank=same; sdk; ray; }
+
+  data -> transform [label="validate"];
+  transform -> parquet [label="write"];
+  parquet -> sdk [label="feature sources"];
+  sdk -> postgres [label="register + materialize"];
+  postgres -> ready [label="online lookup"];
+  sdk -> ray [label="batch engine", style=dashed, constraint=false];
+}

@@ -1,0 +1,56 @@
+# Apply after MinIO is ready. Creates the demo bucket if it does not exist.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-bootstrap
+  namespace: {{DEMO_NAMESPACE}}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: {{MINIO_FS_GROUP}}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: create-bucket
+        image: {{MINIO_SYNC_IMAGE}}
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args:
+        - >-
+          aws --endpoint-url "$S3_ENDPOINT" --no-cli-pager
+          s3api head-bucket --bucket "$MINIO_BUCKET" >/dev/null 2>&1
+          || aws --endpoint-url "$S3_ENDPOINT" --no-cli-pager
+          s3api create-bucket --bucket "$MINIO_BUCKET" >/dev/null
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-user
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{MINIO_ROOT_SECRET_NAME}}
+              key: root-password
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        - name: S3_ENDPOINT
+          value: http://{{MINIO_SERVICE}}.{{DEMO_NAMESPACE}}.svc.cluster.local:9000
+        - name: MINIO_BUCKET
+          value: {{MINIO_BUCKET}}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

@@ -3,14 +3,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: feast-sa
-  namespace: feast-trainer-demo
+  name: {{FEAST_SERVICE_ACCOUNT}}
+  namespace: {{DEMO_NAMESPACE}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: feast-rayjob-role
-  namespace: feast-trainer-demo
+  namespace: {{DEMO_NAMESPACE}}
 rules:
 - apiGroups: [""]
   resources: ["pods", "pods/log", "services", "configmaps", "secrets"]
@@ -23,11 +23,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: feast-rayjob-rolebinding
-  namespace: feast-trainer-demo
+  namespace: {{DEMO_NAMESPACE}}
 subjects:
 - kind: ServiceAccount
-  name: feast-sa
-  namespace: feast-trainer-demo
+  name: {{FEAST_SERVICE_ACCOUNT}}
+  namespace: {{DEMO_NAMESPACE}}
 roleRef:
   kind: Role
   name: feast-rayjob-role
@@ -37,11 +37,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: trainjob-ray-access
-  namespace: feast-trainer-demo
+  namespace: {{DEMO_NAMESPACE}}
 subjects:
 - kind: ServiceAccount
   name: default
-  namespace: feast-trainer-demo
+  namespace: {{DEMO_NAMESPACE}}
 roleRef:
   kind: Role
   name: feast-rayjob-role
